@@ -1,3 +1,4 @@
+import { Cadence } from "./cadence";
 import { Challenger } from "./challenge";
 import { MAX_CLOSE_CODE } from "./close-reason";
 import {
@@ -6,6 +7,8 @@ import {
   encodeDatagram,
 } from "./datagram";
 import type { Engine } from "./engine";
+import type { DeliveryMode } from "./message";
+import { assertFitsInDatagram, Outbox } from "./outbox";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -23,11 +26,20 @@ export type ServerEvent =
       readonly type: "connectionOpened";
       readonly connection: ConnectionId;
       readonly address: Address;
+    }
+  | { readonly type: "tick"; readonly tick: number }
+  | {
+      readonly type: "message";
+      readonly connection: ConnectionId;
+      readonly id: number;
+      readonly body: Uint8Array;
     };
 
 export interface ServerEngineConfig {
   /** 16 random bytes keying the Handshake challenges; never sent. */
   readonly secret: Uint8Array;
+  /** How many Ticks the Server runs per second. */
+  readonly tickRate: number;
   /** Clients being authenticated count towards it, so that the Server never accepts more. */
   readonly maxConnections: number;
   /**
@@ -37,13 +49,26 @@ export interface ServerEngineConfig {
   readonly timeout: number;
 }
 
+interface OpenConnection {
+  readonly id: ConnectionId;
+  readonly address: Address;
+  readonly outbox: Outbox;
+}
+
 /**
  * The Server side of the protocol. An address gets considered for a
  * Connection only once it has echoed a challenge, which proves the Client
  * receives at that address; until then the Server keeps nothing about it.
+ *
+ * The Server runs Ticks at a fixed rate, numbered from 1. Messages sent to a
+ * Connection are queued and leave together when the current Tick ends. A Tick
+ * ends once its `tick` event has been handled, that is at the first
+ * `pollDatagrams` after the `pollEvents` that returned it, so that whatever
+ * the game sends while handling it leaves with it.
  */
 export class ServerEngine implements Engine<ServerEvent> {
   readonly #challenger: Challenger;
+  readonly #ticks: Cadence;
   readonly #maxConnections: number;
   readonly #timeout: number;
   /** Proven addresses waiting for the authentication decision, in the order they were asked about. */
@@ -51,17 +76,39 @@ export class ServerEngine implements Engine<ServerEvent> {
     ConnectionId,
     { readonly address: Address; readonly deadline: number }
   >();
-  readonly #connections = new Map<ConnectionId, Address>();
-  /** Every address being authenticated or connected, by its key. */
-  readonly #byAddress = new Map<string, ConnectionId>();
+  readonly #authenticatingAddresses = new Set<string>();
+  readonly #byAddress = new Map<string, OpenConnection>();
+  readonly #byId = new Map<ConnectionId, OpenConnection>();
   #nextConnectionId: ConnectionId = 1;
+  #tick = 0;
+  #tickState: "between" | "started" | "ending" = "between";
   #datagrams: OutgoingDatagram[] = [];
   #events: ServerEvent[] = [];
 
-  constructor(config: ServerEngineConfig) {
+  constructor(config: ServerEngineConfig, now: number) {
     this.#challenger = new Challenger(config.secret);
+    this.#ticks = new Cadence(now, config.tickRate, "Tick rate");
     this.#maxConnections = config.maxConnections;
     this.#timeout = config.timeout;
+  }
+
+  /** Queues a Message until the end of the Tick; throws if it can never be sent. */
+  send(
+    connection: ConnectionId,
+    id: number,
+    body: Uint8Array,
+    delivery: DeliveryMode,
+  ): void {
+    const open = this.#byId.get(connection);
+    if (!open) throw new Error(`There is no open Connection ${connection}`);
+    open.outbox.push(id, body, delivery);
+  }
+
+  /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
+  broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
+    assertFitsInDatagram(id, body);
+    for (const open of this.#byId.values())
+      open.outbox.push(id, body, delivery);
   }
 
   receive(data: Uint8Array, from: Address, now: number): void {
@@ -95,6 +142,18 @@ export class ServerEngine implements Engine<ServerEvent> {
         if (this.#challenger.verify(datagram.challenge, from, now))
           this.#authenticate(from, datagram.authToken, now);
         break;
+      case "connected": {
+        const open = this.#byAddress.get(addressKey(from));
+        if (!open) break;
+        for (const { id, body } of datagram.messages)
+          this.#events.push({
+            type: "message",
+            connection: open.id,
+            id,
+            body,
+          });
+        break;
+      }
     }
   }
 
@@ -105,8 +164,10 @@ export class ServerEngine implements Engine<ServerEvent> {
   accept(connection: ConnectionId): boolean {
     const address = this.#authenticating.get(connection)?.address;
     if (!address) return false;
-    this.#authenticating.delete(connection);
-    this.#connections.set(connection, address);
+    this.#forgetAuthentication(connection, address);
+    const open = { id: connection, address, outbox: new Outbox() };
+    this.#byAddress.set(addressKey(address), open);
+    this.#byId.set(connection, open);
     this.#events.push({ type: "connectionOpened", connection, address });
     this.#send(address, encodeDatagram({ kind: "accepted" }));
     return true;
@@ -117,10 +178,10 @@ export class ServerEngine implements Engine<ServerEvent> {
    * open. The Client is not told yet.
    */
   close(connection: ConnectionId): void {
-    const address = this.#connections.get(connection);
-    if (!address) return;
-    this.#connections.delete(connection);
-    this.#byAddress.delete(addressKey(address));
+    const open = this.#byId.get(connection);
+    if (!open) return;
+    this.#byId.delete(connection);
+    this.#byAddress.delete(addressKey(open.address));
   }
 
   /**
@@ -148,21 +209,36 @@ export class ServerEngine implements Engine<ServerEvent> {
       // The Client has given up by now, or soon will: it times out on its own.
       this.#forgetAuthentication(connection, address);
     }
+    // One Tick per call, so that each one is handled and flushed before the next starts.
+    if (this.#tickState === "between" && now >= this.#ticks.next) {
+      this.#ticks.step();
+      this.#tick++;
+      this.#tickState = "started";
+      this.#events.push({ type: "tick", tick: this.#tick });
+    }
   }
 
   nextDeadline(): number | undefined {
     // Every authentication waits as long, so the oldest one ends first.
-    for (const { deadline } of this.#authenticating.values()) return deadline;
-    return undefined;
+    for (const { deadline } of this.#authenticating.values())
+      return Math.min(deadline, this.#ticks.next);
+    return this.#ticks.next;
   }
 
   pollDatagrams(): OutgoingDatagram[] {
+    if (this.#tickState === "ending") {
+      this.#tickState = "between";
+      for (const open of this.#byId.values())
+        for (const data of open.outbox.flush(this.#tick))
+          this.#datagrams.push({ to: open.address, data });
+    }
     const datagrams = this.#datagrams;
     this.#datagrams = [];
     return datagrams;
   }
 
   pollEvents(): ServerEvent[] {
+    if (this.#tickState === "started") this.#tickState = "ending";
     const events = this.#events;
     this.#events = [];
     return events;
@@ -170,20 +246,22 @@ export class ServerEngine implements Engine<ServerEvent> {
 
   #forgetAuthentication(connection: ConnectionId, address: Address): void {
     this.#authenticating.delete(connection);
-    this.#byAddress.delete(addressKey(address));
+    this.#authenticatingAddresses.delete(addressKey(address));
   }
 
   #authenticate(from: Address, authToken: Uint8Array, now: number): void {
     const key = addressKey(from);
-    const known = this.#byAddress.get(key);
-    if (known !== undefined) {
-      // A repeated echo means the acceptance was lost: answer again, without a second Connection.
-      // While the decision is pending, the game has already been asked.
-      if (this.#connections.has(known))
-        this.#send(from, encodeDatagram({ kind: "accepted" }));
+    // A repeated echo means the acceptance was lost: answer again, without a second Connection.
+    if (this.#byAddress.has(key)) {
+      this.#send(from, encodeDatagram({ kind: "accepted" }));
       return;
     }
-    if (this.#byAddress.size >= this.#maxConnections) {
+    // While the decision is pending, the game has already been asked.
+    if (this.#authenticatingAddresses.has(key)) return;
+    if (
+      this.#byAddress.size + this.#authenticating.size >=
+      this.#maxConnections
+    ) {
       this.#send(
         from,
         encodeDatagram({ kind: "refused", reason: { kind: "serverFull" } }),
@@ -195,7 +273,7 @@ export class ServerEngine implements Engine<ServerEvent> {
       address: from,
       deadline: now + this.#timeout,
     });
-    this.#byAddress.set(key, connection);
+    this.#authenticatingAddresses.add(key);
     this.#events.push({
       type: "authenticationRequested",
       connection,

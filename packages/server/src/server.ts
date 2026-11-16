@@ -1,9 +1,12 @@
 import {
   EngineDriver,
+  MessageRouter,
   ServerEngine,
   type Address,
   type Clock,
   type ConnectionId,
+  type DeliveryMode,
+  type MessageType,
   type ServerEvent,
   type Transport,
 } from "@ticknet/core";
@@ -34,6 +37,8 @@ export type Authenticate<Data> = (
 export interface ServerOptions {
   readonly transport: Transport;
   readonly clock: Clock;
+  /** Ticks per second; 30 by default. */
+  readonly tickRate?: number;
   /**
    * Further Clients are refused with a Server full reason; Clients being
    * authenticated count towards it. 64 by default.
@@ -47,30 +52,50 @@ export interface ServerOptions {
   readonly timeout?: number;
 }
 
+/** What a Connection needs from its Server. */
+interface ConnectionLink {
+  send(id: number, body: Uint8Array, delivery: DeliveryMode): void;
+  close(): void;
+}
+
 /** One Client's Connection to this Server. */
 export class Connection<Data = undefined> {
   readonly address: Address;
   /** What the authentication callback attached to this Connection. */
   readonly data: Data;
-  readonly #close: () => void;
+  readonly #link: ConnectionLink;
 
   /** Connections are made by the Server. */
-  constructor(address: Address, data: Data, close: () => void) {
+  constructor(address: Address, data: Data, link: ConnectionLink) {
     this.address = address;
     this.data = data;
-    this.#close = close;
+    this.#link = link;
+  }
+
+  /**
+   * Sends a Message to this Client when the current Tick ends. Throws at once
+   * if the Message cannot fit in one Datagram.
+   */
+  send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
+    this.#link.send(type.id, type.encode(value), delivery);
   }
 
   /** Ends this Connection, freeing its place on the Server. The Client is not told yet. */
   close(): void {
-    this.#close();
+    this.#link.close();
   }
 }
 
 export interface ServerEvents<Data = undefined> {
   connectionOpened: (connection: Connection<Data>) => void;
-  /** Something the game supplied failed (a throwing authentication callback, say); the Server carries on. */
-  error: (error: unknown) => void;
+  /** Runs once per Tick, before everything sent during the Tick leaves. */
+  tick: (tick: number) => void;
+  /**
+   * A received Message could not be decoded, its handler threw, or the
+   * authentication callback failed; the Server carries on. Without a
+   * listener, the error is written to the console.
+   */
+  error: (error: Error) => void;
 }
 
 /** A decision with the Connection's data always present, as the Server applies it. */
@@ -83,6 +108,7 @@ export class Server<Data = undefined> {
     [E in keyof ServerEvents<Data>]: Set<ServerEvents<Data>[E]>;
   } = {
     connectionOpened: new Set(),
+    tick: new Set(),
     error: new Set(),
   };
   readonly #engine: ServerEngine;
@@ -90,8 +116,11 @@ export class Server<Data = undefined> {
   readonly #authenticate: (
     request: AuthenticationRequest,
   ) => Decision<Data> | Promise<Decision<Data>>;
-  /** Connections accepted by the callback, until the engine opens them. */
-  readonly #accepted = new Map<ConnectionId, Connection<Data>>();
+  /** Every Connection from its acceptance until it closes. */
+  readonly #connections = new Map<ConnectionId, Connection<Data>>();
+  readonly #router = new MessageRouter<Connection<Data>>((error) =>
+    this.#report(error),
+  );
 
   /** Use `startServer`. */
   constructor(
@@ -101,11 +130,15 @@ export class Server<Data = undefined> {
     ) => Decision<Data> | Promise<Decision<Data>>,
   ) {
     this.#authenticate = authenticate;
-    this.#engine = new ServerEngine({
-      secret: crypto.getRandomValues(new Uint8Array(16)),
-      maxConnections: options.maxConnections ?? 64,
-      timeout: options.timeout ?? 10_000,
-    });
+    this.#engine = new ServerEngine(
+      {
+        secret: crypto.getRandomValues(new Uint8Array(16)),
+        tickRate: options.tickRate ?? 30,
+        maxConnections: options.maxConnections ?? 64,
+        timeout: options.timeout ?? 10_000,
+      },
+      options.clock.now(),
+    );
     this.#driver = new EngineDriver(
       this.#engine,
       options.transport,
@@ -119,11 +152,19 @@ export class Server<Data = undefined> {
             });
             break;
           case "connectionOpened": {
-            const connection = this.#accepted.get(event.connection);
+            const connection = this.#connections.get(event.connection);
             if (!connection) break;
-            this.#accepted.delete(event.connection);
             for (const listener of this.#listeners.connectionOpened)
               listener(connection);
+            break;
+          }
+          case "tick":
+            for (const listener of this.#listeners.tick) listener(event.tick);
+            break;
+          case "message": {
+            const connection = this.#connections.get(event.connection);
+            if (connection)
+              this.#router.route(event.id, event.body, connection);
             break;
           }
         }
@@ -136,6 +177,22 @@ export class Server<Data = undefined> {
     listener: ServerEvents<Data>[E],
   ): void {
     this.#listeners[event].add(listener);
+  }
+
+  /** Sets the handler for one Message type, called with the Connection it came from and its decoded value. */
+  onMessage<T>(
+    type: MessageType<T>,
+    handler: (connection: Connection<Data>, value: T) => void,
+  ): void {
+    this.#router.on(type, (value, connection) => handler(connection, value));
+  }
+
+  /**
+   * Sends a Message to every open Connection when the current Tick ends.
+   * Throws at once, sending to none, if the Message cannot fit in one Datagram.
+   */
+  broadcast<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
+    this.#engine.broadcast(type.id, type.encode(value), delivery);
   }
 
   #authenticateClient(
@@ -172,11 +229,16 @@ export class Server<Data = undefined> {
     if (decision.accept) {
       // The engine's opened event is handed out after this returns, so registering afterwards is in time.
       if (this.#engine.accept(connection))
-        this.#accepted.set(
+        this.#connections.set(
           connection,
-          new Connection(address, decision.data, () =>
-            this.#driver.perform(() => this.#engine.close(connection)),
-          ),
+          new Connection(address, decision.data, {
+            send: (id, body, delivery) =>
+              this.#engine.send(connection, id, body, delivery),
+            close: () => {
+              this.#connections.delete(connection);
+              this.#driver.perform(() => this.#engine.close(connection));
+            },
+          }),
         );
       return;
     }
@@ -190,14 +252,17 @@ export class Server<Data = undefined> {
   /** A failing callback must neither stop the Server nor let the Client in. */
   #refuseAfter(error: unknown, connection: ConnectionId): void {
     this.#engine.deny(connection, 0);
-    this.#report(error);
+    // The game may throw anything; listeners always get an Error.
+    this.#report(
+      error instanceof Error
+        ? error
+        : new Error("The authentication callback failed", { cause: error }),
+    );
   }
 
-  #report(error: unknown): void {
-    const listeners = this.#listeners.error;
-    // Never silent: without a listener, the error still reaches the console.
-    if (listeners.size === 0) console.error(error);
-    for (const listener of listeners) listener(error);
+  #report(error: Error): void {
+    if (this.#listeners.error.size === 0) console.error(error);
+    for (const listener of this.#listeners.error) listener(error);
   }
 }
 
