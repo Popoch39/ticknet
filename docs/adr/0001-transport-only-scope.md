@@ -1,0 +1,3 @@
+# ticknet is a transport, not a netcode framework
+
+ticknet carries the game's Messages between a Server and its Clients with a chosen Delivery mode, and stops there: it does not replicate game state, interpolate, predict, or estimate the Server's current Tick on the Client, and it ships no schema language, matchmaking, rooms or peer-to-peer. Bun has nothing above `Bun.udpSocket` today, and the transport layer (connections, Handshake, acknowledgements, resends, ordering, fragmentation, budgets) is what every Bun game would otherwise rebuild identically; state synchronization is where games differ most, so building it in would force one model on everyone and multiply the scope. A state-sync layer can be built on top later without changing the transport.

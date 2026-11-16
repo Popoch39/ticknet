@@ -1,0 +1,3 @@
+# Datagrams are plaintext in v1
+
+v1 sends Datagrams unencrypted and unsigned, and Auth tokens are opaque bytes checked by the game rather than signed connect tokens. Encryption with key exchange is a substantial piece of work of its own and is not needed to prove the transport; v1 still protects the Server against the attacks a plaintext protocol can stop (address proof by a stateless challenge before any allocation, no reply larger than the request to an unproven address, silent drop of malformed Datagrams). To keep the door open, every Datagram starts with a protocol version byte, so a later version can introduce encryption or a new format and refuse older Clients and Servers explicitly. Games that need confidentiality in v1 must not send secrets through ticknet.
