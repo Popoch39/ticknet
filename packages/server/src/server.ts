@@ -4,6 +4,7 @@ import {
   ServerEngine,
   type Address,
   type Clock,
+  type ConnectionHealth,
   type ConnectionId,
   type DeliveryMode,
   type MessageType,
@@ -63,6 +64,7 @@ export interface ServerOptions {
 interface ConnectionLink {
   send(id: number, body: Uint8Array, delivery: DeliveryMode): void;
   close(): void;
+  health(): ConnectionHealth | undefined;
 }
 
 /** One Client's Connection to this Server. */
@@ -77,6 +79,22 @@ export class Connection<Data = undefined> {
     this.address = address;
     this.data = data;
     this.#link = link;
+  }
+
+  /**
+   * Milliseconds a Datagram takes to reach this Client and be acknowledged,
+   * smoothed over recent ones; undefined until the first acknowledgement.
+   */
+  get roundTripTime(): number | undefined {
+    return this.#link.health()?.roundTripTime;
+  }
+
+  /**
+   * Share of the recent Datagrams sent to this Client that never reached it,
+   * from 0 to 1; undefined until the fate of one is known.
+   */
+  get lossRate(): number | undefined {
+    return this.#link.health()?.lossRate;
   }
 
   /**
@@ -249,6 +267,7 @@ export class Server<Data = undefined> {
           new Connection(address, decision.data, {
             send: (id, body, delivery) =>
               this.#engine.send(connection, id, body, delivery),
+            health: () => this.#engine.health(connection),
             close: () => {
               this.#connections.delete(connection);
               this.#driver.perform(() => this.#engine.close(connection));

@@ -94,6 +94,22 @@ export class Client {
     return this.#engine.lastServerTick;
   }
 
+  /**
+   * Milliseconds a Datagram takes to reach the Server and be acknowledged,
+   * smoothed over recent ones; undefined until the first acknowledgement.
+   */
+  get roundTripTime(): number | undefined {
+    return this.#engine.health.roundTripTime;
+  }
+
+  /**
+   * Share of the recent Datagrams sent to the Server that never reached it,
+   * from 0 to 1; undefined until the fate of one is known.
+   */
+  get lossRate(): number | undefined {
+    return this.#engine.health.lossRate;
+  }
+
   on<E extends keyof ClientEvents>(event: E, listener: ClientEvents[E]): void {
     this.#listeners[event].add(listener);
   }

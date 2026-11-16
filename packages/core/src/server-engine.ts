@@ -8,8 +8,9 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { assertFitsInDatagram, Outbox } from "./outbox";
-import { ReceivedSequences } from "./received-sequences";
+import { Link } from "./link";
+import { assertFitsInDatagram } from "./outbox";
+import type { ConnectionHealth } from "./sent-datagrams";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -53,8 +54,7 @@ export interface ServerEngineConfig {
 interface OpenConnection {
   readonly id: ConnectionId;
   readonly address: Address;
-  readonly outbox: Outbox;
-  readonly received: ReceivedSequences;
+  readonly link: Link;
 }
 
 /**
@@ -84,6 +84,8 @@ export class ServerEngine implements Engine<ServerEvent> {
   #nextConnectionId: ConnectionId = 1;
   #tick = 0;
   #tickState: "between" | "started" | "ending" = "between";
+  /** The Tick's Datagrams leave in the same step as its event, so at the time it started. */
+  #tickStartedAt = 0;
   #datagrams: OutgoingDatagram[] = [];
   #events: ServerEvent[] = [];
 
@@ -109,14 +111,18 @@ export class ServerEngine implements Engine<ServerEvent> {
   ): void {
     const open = this.#byId.get(connection);
     if (!open) throw new Error(`There is no open Connection ${connection}`);
-    open.outbox.push(id, body, delivery);
+    open.link.send(id, body, delivery);
   }
 
   /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
   broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
     assertFitsInDatagram(id, body);
-    for (const open of this.#byId.values())
-      open.outbox.push(id, body, delivery);
+    for (const open of this.#byId.values()) open.link.send(id, body, delivery);
+  }
+
+  /** The round-trip time and loss rate measured on an open Connection; undefined if it is not open. */
+  health(connection: ConnectionId): ConnectionHealth | undefined {
+    return this.#byId.get(connection)?.link.health;
   }
 
   receive(data: Uint8Array, from: Address, now: number): void {
@@ -152,8 +158,9 @@ export class ServerEngine implements Engine<ServerEvent> {
         break;
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
-        if (!open || !open.received.accept(datagram.sequence)) break;
-        for (const { id, body } of datagram.messages)
+        const messages = open?.link.receive(datagram, now);
+        if (!open || !messages) break;
+        for (const { id, body } of messages)
           this.#events.push({
             type: "message",
             connection: open.id,
@@ -176,8 +183,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     const open = {
       id: connection,
       address,
-      outbox: new Outbox(),
-      received: new ReceivedSequences(),
+      link: new Link(),
     };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);
@@ -226,6 +232,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     if (this.#tickState === "between" && now >= this.#ticks.next) {
       this.#ticks.step();
       this.#tick++;
+      this.#tickStartedAt = now;
       this.#tickState = "started";
       this.#events.push({ type: "tick", tick: this.#tick });
     }
@@ -242,7 +249,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     if (this.#tickState === "ending") {
       this.#tickState = "between";
       for (const open of this.#byId.values())
-        for (const data of open.outbox.flush(this.#tick))
+        for (const data of open.link.flush(this.#tick, this.#tickStartedAt))
           this.#datagrams.push({ to: open.address, data });
     }
     const datagrams = this.#datagrams;

@@ -7,8 +7,8 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { Outbox } from "./outbox";
-import { ReceivedSequences } from "./received-sequences";
+import { Link } from "./link";
+import type { ConnectionHealth } from "./sent-datagrams";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 export type ClientEvent =
@@ -50,8 +50,7 @@ export class ClientEngine implements Engine<ClientEvent> {
   /** The Handshake Datagram of the current step, sent again until the Server answers it. */
   #handshakeDatagram: Uint8Array;
   #handshakeResendAt: number;
-  readonly #outbox = new Outbox();
-  readonly #received = new ReceivedSequences();
+  readonly #link = new Link();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
   #lastServerTick: number | undefined;
@@ -80,11 +79,16 @@ export class ClientEngine implements Engine<ClientEvent> {
     return this.#lastServerTick;
   }
 
+  /** The round-trip time and loss rate measured on the link to the Server. */
+  get health(): ConnectionHealth {
+    return this.#link.health;
+  }
+
   /** Queues a Message until the next send step; throws if it can never be sent. */
   send(id: number, body: Uint8Array, delivery: DeliveryMode): void {
     if (this.#state !== "connected")
       throw new Error("The Client can only send once it is connected");
-    this.#outbox.push(id, body, delivery);
+    this.#link.send(id, body, delivery);
   }
 
   receive(data: Uint8Array, from: Address, now: number): void {
@@ -116,20 +120,19 @@ export class ClientEngine implements Engine<ClientEvent> {
       case "refused":
         if (this.#inHandshake()) this.#close(datagram.reason);
         break;
-      case "connected":
-        if (
-          this.#state !== "connected" ||
-          !this.#received.accept(datagram.sequence)
-        )
-          break;
+      case "connected": {
+        if (this.#state !== "connected") break;
+        const messages = this.#link.receive(datagram, now);
+        if (!messages) break;
         if (
           this.#lastServerTick === undefined ||
           datagram.tick > this.#lastServerTick
         )
           this.#lastServerTick = datagram.tick;
-        for (const { id, body } of datagram.messages)
+        for (const { id, body } of messages)
           this.#events.push({ type: "message", id, body });
         break;
+      }
     }
   }
 
@@ -140,7 +143,7 @@ export class ClientEngine implements Engine<ClientEvent> {
       this.#sendHandshake(this.#handshakeDatagram, now);
     if (this.#state === "connected" && now >= this.#sendSteps.next) {
       this.#step++;
-      for (const data of this.#outbox.flush(this.#step))
+      for (const data of this.#link.flush(this.#step, now))
         this.#datagrams.push({ to: this.#server, data });
       // A late wake-up takes one step, not one per interval missed: a single flush covers them all.
       this.#sendSteps.skipPast(now);

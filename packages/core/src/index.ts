@@ -21,6 +21,7 @@ export {
   type MessageType,
 } from "./message";
 export { MessageRouter } from "./message-router";
+export type { ConnectionHealth } from "./sent-datagrams";
 export {
   ServerEngine,
   type ConnectionId,

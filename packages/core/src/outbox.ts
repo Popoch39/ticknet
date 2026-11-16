@@ -1,5 +1,4 @@
 import {
-  encodeDatagram,
   MAX_DATAGRAM_MESSAGE_SIZE,
   packMessages,
   type MessageEntry,
@@ -17,11 +16,10 @@ export function assertFitsInDatagram(id: number, body: Uint8Array): void {
 /**
  * The Messages one endpoint has sent on a Connection and not yet put on the
  * network. They leave together, in as few Datagrams as possible, when the
- * outbox is flushed.
+ * outbox is taken.
  */
 export class Outbox {
   #messages: MessageEntry[] = [];
-  #sequence = 0;
 
   /** Throws a RangeError, before queuing anything, for a body that cannot fit in one Datagram. */
   push(id: number, body: Uint8Array, delivery: DeliveryMode): void {
@@ -29,20 +27,10 @@ export class Outbox {
     this.#messages.push({ delivery, id, body });
   }
 
-  /**
-   * Empties the outbox into connected Datagrams stamped with the sender's
-   * `tick` and each with the next sequence number.
-   */
-  flush(tick: number): Uint8Array[] {
+  /** Empties the outbox into the groups of Messages that each fill one connected Datagram. */
+  take(): MessageEntry[][] {
     const groups = packMessages(this.#messages);
     this.#messages = [];
-    return groups.map((messages) =>
-      encodeDatagram({
-        kind: "connected",
-        tick,
-        sequence: this.#sequence++,
-        messages,
-      }),
-    );
+    return groups;
   }
 }

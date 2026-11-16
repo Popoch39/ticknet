@@ -42,10 +42,14 @@ const KIND_CONNECTED = 6;
 /**
  * A connected Datagram, sent either way on an open Connection: after the
  * common header, the sender's Tick number (32 bits), its sequence number
- * (32 bits), then Message entries up to the end. Acknowledgement data is
- * meant to join this header.
+ * (32 bits), its acknowledgement (newest sequence number received, 32 bits;
+ * received mask, 32 bits; delay in milliseconds, 16 bits), then Message
+ * entries up to the end.
  */
-const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4 + 4;
+const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4 + 4 + 4 + 4 + 2;
+
+/** The longest acknowledgement delay the wire can tell; a longer one is sent as this. */
+const MAX_ACKNOWLEDGEMENT_DELAY = 0xffff;
 
 /**
  * Each Message entry is a type byte, the Message id (16 bits), the body length
@@ -79,6 +83,27 @@ export interface MessageEntry {
   readonly body: Uint8Array;
 }
 
+/**
+ * What one side of a Connection tells the other about the connected
+ * Datagrams it received from it. Before anything is received, `received` is
+ * 0, which acknowledges nothing.
+ */
+export interface Acknowledgement {
+  /** The newest sequence number received. */
+  readonly newest: number;
+  /** Bit i (0 to 31) is set when sequence number `newest - i` was received. */
+  readonly received: number;
+  /**
+   * Milliseconds between the arrival of `newest` and the sending of this
+   * acknowledgement, so that the other side can leave it out of the
+   * round-trip time.
+   */
+  readonly delay: number;
+}
+
+/** How many sequence numbers one acknowledgement covers, ending at its newest. */
+export const ACKNOWLEDGEMENT_SPAN = 32;
+
 export type Datagram =
   | { readonly kind: "connectRequest" }
   | { readonly kind: "challenge"; readonly challenge: Uint8Array }
@@ -94,8 +119,11 @@ export type Datagram =
       readonly tick: number;
       /** Counts the connected Datagrams one side sent on one Connection, from 0, so that a copy is recognized. */
       readonly sequence: number;
+      readonly acknowledgement: Acknowledgement;
       readonly messages: readonly MessageEntry[];
     };
+
+export type ConnectedDatagram = Extract<Datagram, { kind: "connected" }>;
 
 /** A Datagram from an endpoint of another protocol version, whose format is unknown. */
 export type OtherVersion = { readonly kind: "otherVersion" };
@@ -200,8 +228,9 @@ export function packMessages(
 function encodeConnected({
   tick,
   sequence,
+  acknowledgement,
   messages,
-}: Extract<Datagram, { kind: "connected" }>): Uint8Array {
+}: ConnectedDatagram): Uint8Array {
   const size = messages.reduce(
     (total, message) => total + entrySize(message),
     CONNECTED_HEADER_SIZE,
@@ -210,6 +239,15 @@ function encodeConnected({
   const view = new DataView(data.buffer);
   view.setUint32(HEADER_SIZE, tick);
   view.setUint32(HEADER_SIZE + 4, sequence);
+  view.setUint32(HEADER_SIZE + 8, acknowledgement.newest);
+  view.setUint32(HEADER_SIZE + 12, acknowledgement.received >>> 0);
+  view.setUint16(
+    HEADER_SIZE + 16,
+    Math.min(
+      MAX_ACKNOWLEDGEMENT_DELAY,
+      Math.max(0, Math.round(acknowledgement.delay)),
+    ),
+  );
   let offset = CONNECTED_HEADER_SIZE;
   for (const message of messages) {
     view.setUint8(offset, ENTRY_UNRELIABLE);
@@ -243,6 +281,11 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
     kind: "connected",
     tick: view.getUint32(HEADER_SIZE),
     sequence: view.getUint32(HEADER_SIZE + 4),
+    acknowledgement: {
+      newest: view.getUint32(HEADER_SIZE + 8),
+      received: view.getUint32(HEADER_SIZE + 12),
+      delay: view.getUint16(HEADER_SIZE + 16),
+    },
     messages,
   };
 }

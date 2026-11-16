@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   ClientEngine,
+  MAX_DATAGRAM_MESSAGE_SIZE,
   ServerEngine,
   type Address,
+  type ConnectionId,
   type ServerEvent,
 } from "@ticknet/core";
 
@@ -33,13 +35,18 @@ function connectedPair() {
   carry(client, server, CLIENT);
   carry(server, client, SERVER);
   carry(client, server, CLIENT);
+  let connection: ConnectionId | undefined;
   for (const event of server.pollEvents())
-    if (event.type === "authenticationRequested")
+    if (event.type === "authenticationRequested") {
       server.accept(event.connection);
+      connection = event.connection;
+    }
+  if (connection === undefined)
+    throw new Error("Expected the Server to ask for authentication");
   carry(server, client, SERVER);
   server.pollEvents();
   client.pollEvents();
-  return { server, client };
+  return { server, client, connection };
 }
 
 const SENT: { id: number; body: Uint8Array }[] = [
@@ -95,11 +102,11 @@ test("whatever prefix of a connected Datagram arrives, no partial Message is eve
 test("a connected Datagram with a Message claiming more bytes than remain, or of an unknown entry type, is dropped", () => {
   const data = clientDatagram();
   const { server } = connectedPair();
-  // The first entry starts after the ten-byte header: a type byte, the id, then the body length.
+  // The first entry starts after the twenty-byte header: a type byte, the id, then the body length.
   const overrunning = data.slice();
-  new DataView(overrunning.buffer).setUint16(10 + 3, 0xffff);
+  new DataView(overrunning.buffer).setUint16(20 + 3, 0xffff);
   const unknownEntry = data.slice();
-  unknownEntry[10] = 0xff;
+  unknownEntry[20] = 0xff;
 
   server.receive(overrunning, CLIENT, 0);
   server.receive(unknownEntry, CLIENT, 0);
@@ -114,4 +121,72 @@ test("a connected Datagram from an address without a Connection is dropped", () 
 
   expect(server.pollEvents()).toEqual([]);
   expect(server.pollDatagrams()).toEqual([]);
+});
+
+/** A Message body that fills a connected Datagram on its own. */
+const FULL = new Uint8Array(MAX_DATAGRAM_MESSAGE_SIZE);
+
+/**
+ * At time 100, the Client sends three full Datagrams, of which the Server
+ * receives all but the second, and the Server sends three full Datagrams of
+ * its own right after. Returns the Server's Datagrams.
+ */
+function serverAnswersClient() {
+  const pair = connectedPair();
+  const { server, client } = pair;
+  for (let count = 0; count < 3; count++) client.send(1, FULL, "unreliable");
+  client.advance(100);
+  client.pollDatagrams().forEach(({ data }, index) => {
+    if (index !== 1) server.receive(data, CLIENT, 100);
+  });
+  server.advance(100);
+  server.pollEvents();
+  for (let count = 0; count < 3; count++)
+    server.broadcast(2, FULL, "unreliable");
+  return { ...pair, answers: server.pollDatagrams() };
+}
+
+/** The same exchange the other way round: the Server sends first and the Client answers. */
+function clientAnswersServer() {
+  const pair = connectedPair();
+  const { server, client } = pair;
+  server.advance(100);
+  server.pollEvents();
+  for (let count = 0; count < 3; count++)
+    server.broadcast(2, FULL, "unreliable");
+  server.pollDatagrams().forEach(({ data }, index) => {
+    if (index !== 1) client.receive(data, SERVER, 100);
+  });
+  for (let count = 0; count < 3; count++) client.send(1, FULL, "unreliable");
+  client.advance(100);
+  return { ...pair, answers: client.pollDatagrams() };
+}
+
+test("each Datagram the Server sends, on its own, acknowledges the Client's recent Datagrams", () => {
+  for (const index of [0, 1, 2]) {
+    const { client, answers } = serverAnswersClient();
+    const answer = answers[index];
+    if (!answer || answers.length !== 3)
+      throw new Error("Expected three Datagrams from the Server");
+
+    client.receive(answer.data, SERVER, 150);
+
+    expect(client.health).toEqual({ roundTripTime: 50, lossRate: 1 / 3 });
+  }
+});
+
+test("each Datagram the Client sends, on its own, acknowledges the Server's recent Datagrams", () => {
+  for (const index of [0, 1, 2]) {
+    const { server, connection, answers } = clientAnswersServer();
+    const answer = answers[index];
+    if (!answer || answers.length !== 3)
+      throw new Error("Expected three Datagrams from the Client");
+
+    server.receive(answer.data, CLIENT, 150);
+
+    expect(server.health(connection)).toEqual({
+      roundTripTime: 50,
+      lossRate: 1 / 3,
+    });
+  }
 });
