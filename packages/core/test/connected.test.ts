@@ -89,11 +89,11 @@ test("whatever prefix of a connected Datagram arrives, no partial Message is eve
 test("a connected Datagram with a Message claiming more bytes than remain, or of an unknown entry type, is dropped", () => {
   const data = clientDatagram();
   const { server } = connectedPair();
-  // The first entry starts after the six-byte header: a type byte, the id, then the body length.
+  // The first entry starts after the ten-byte header: a type byte, the id, then the body length.
   const overrunning = data.slice();
-  new DataView(overrunning.buffer).setUint16(6 + 3, 0xffff);
+  new DataView(overrunning.buffer).setUint16(10 + 3, 0xffff);
   const unknownEntry = data.slice();
-  unknownEntry[6] = 0xff;
+  unknownEntry[10] = 0xff;
 
   server.receive(overrunning, CLIENT, 0);
   server.receive(unknownEntry, CLIENT, 0);

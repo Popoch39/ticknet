@@ -8,6 +8,7 @@ import {
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { assertFitsInDatagram, Outbox } from "./outbox";
+import { ReceivedSequences } from "./received-sequences";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server; never reused. */
@@ -38,6 +39,7 @@ interface OpenConnection {
   readonly id: ConnectionId;
   readonly address: Address;
   readonly outbox: Outbox;
+  readonly received: ReceivedSequences;
 }
 
 /**
@@ -119,7 +121,7 @@ export class ServerEngine implements Engine<ServerEvent> {
         break;
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
-        if (!open) break;
+        if (!open || !open.received.accept(datagram.sequence)) break;
         for (const { id, body } of datagram.messages)
           this.#events.push({
             type: "message",
@@ -173,6 +175,7 @@ export class ServerEngine implements Engine<ServerEvent> {
         id: this.#nextConnectionId++,
         address: from,
         outbox: new Outbox(),
+        received: new ReceivedSequences(),
       };
       this.#byAddress.set(key, open);
       this.#byId.set(open.id, open);

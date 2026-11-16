@@ -34,10 +34,11 @@ const KIND_CONNECTED = 6;
 
 /**
  * A connected Datagram, sent either way on an open Connection: after the
- * common header, the sender's Tick number (32 bits), then Message entries up
- * to the end. Acknowledgement data is meant to join this header.
+ * common header, the sender's Tick number (32 bits), its sequence number
+ * (32 bits), then Message entries up to the end. Acknowledgement data is
+ * meant to join this header.
  */
-const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4;
+const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4 + 4;
 
 /**
  * Each Message entry is a type byte, the Message id (16 bits), the body length
@@ -69,6 +70,8 @@ export type Datagram =
   | {
       readonly kind: "connected";
       readonly tick: number;
+      /** Counts the connected Datagrams one side sent on one Connection, from 0, so that a copy is recognized. */
+      readonly sequence: number;
       readonly messages: readonly MessageEntry[];
     };
 
@@ -100,7 +103,7 @@ export function encodeDatagram(datagram: Datagram): Uint8Array {
         Uint8Array.of(refusalCode(datagram.reason)),
       );
     case "connected":
-      return encodeConnected(datagram.tick, datagram.messages);
+      return encodeConnected(datagram);
   }
 }
 
@@ -133,10 +136,11 @@ export function packMessages(
   return groups;
 }
 
-function encodeConnected(
-  tick: number,
-  messages: readonly MessageEntry[],
-): Uint8Array {
+function encodeConnected({
+  tick,
+  sequence,
+  messages,
+}: Extract<Datagram, { kind: "connected" }>): Uint8Array {
   const size = messages.reduce(
     (total, message) => total + entrySize(message),
     CONNECTED_HEADER_SIZE,
@@ -144,6 +148,7 @@ function encodeConnected(
   const data = withHeader(KIND_CONNECTED, size);
   const view = new DataView(data.buffer);
   view.setUint32(HEADER_SIZE, tick);
+  view.setUint32(HEADER_SIZE + 4, sequence);
   let offset = CONNECTED_HEADER_SIZE;
   for (const message of messages) {
     view.setUint8(offset, ENTRY_UNRELIABLE);
@@ -173,7 +178,12 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
     });
     offset = bodyEnd;
   }
-  return { kind: "connected", tick: view.getUint32(HEADER_SIZE), messages };
+  return {
+    kind: "connected",
+    tick: view.getUint32(HEADER_SIZE),
+    sequence: view.getUint32(HEADER_SIZE + 4),
+    messages,
+  };
 }
 
 function refusalCode(reason: RefusalReason): number {

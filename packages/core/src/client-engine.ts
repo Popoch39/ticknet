@@ -4,6 +4,7 @@ import { decodeDatagram, encodeDatagram } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { Outbox } from "./outbox";
+import { ReceivedSequences } from "./received-sequences";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 export type ClientEvent =
@@ -14,6 +15,12 @@ export type ClientEvent =
       readonly id: number;
       readonly body: Uint8Array;
     };
+
+/**
+ * Milliseconds between two copies of an unanswered Handshake Datagram, so
+ * that a lost one only delays the Handshake.
+ */
+const HANDSHAKE_RESEND_INTERVAL = 100;
 
 export interface ClientEngineConfig {
   readonly server: Address;
@@ -33,7 +40,11 @@ export class ClientEngine implements Engine<ClientEvent> {
   readonly #handshakeDeadline: number;
   readonly #sendSteps: Cadence;
   #state: "requesting" | "echoing" | "connected" | "closed" = "requesting";
+  /** The Handshake Datagram of the current step, sent again until the Server answers it. */
+  #handshakeDatagram: Uint8Array;
+  #handshakeResendAt: number;
   readonly #outbox = new Outbox();
+  readonly #received = new ReceivedSequences();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
   #lastServerTick: number | undefined;
@@ -44,10 +55,9 @@ export class ClientEngine implements Engine<ClientEvent> {
     this.#server = config.server;
     this.#handshakeDeadline = now + config.timeout;
     this.#sendSteps = new Cadence(now, config.sendRate, "send rate");
-    this.#datagrams.push({
-      to: config.server,
-      data: encodeDatagram({ kind: "connectRequest" }),
-    });
+    this.#handshakeDatagram = encodeDatagram({ kind: "connectRequest" });
+    this.#handshakeResendAt = now + HANDSHAKE_RESEND_INTERVAL;
+    this.#datagrams.push({ to: config.server, data: this.#handshakeDatagram });
   }
 
   /** The highest Tick number found on a Datagram from the Server, if any arrived. */
@@ -73,13 +83,13 @@ export class ClientEngine implements Engine<ClientEvent> {
       case "challenge":
         if (this.#state !== "requesting") break;
         this.#state = "echoing";
-        this.#datagrams.push({
-          to: this.#server,
-          data: encodeDatagram({
+        this.#sendHandshake(
+          encodeDatagram({
             kind: "challengeResponse",
             challenge: datagram.challenge,
           }),
-        });
+          now,
+        );
         break;
       case "accepted":
         if (this.#state !== "echoing") break;
@@ -88,7 +98,11 @@ export class ClientEngine implements Engine<ClientEvent> {
         this.#events.push({ type: "connectionOpened" });
         break;
       case "connected":
-        if (this.#state !== "connected") break;
+        if (
+          this.#state !== "connected" ||
+          !this.#received.accept(datagram.sequence)
+        )
+          break;
         if (
           this.#lastServerTick === undefined ||
           datagram.tick > this.#lastServerTick
@@ -103,6 +117,8 @@ export class ClientEngine implements Engine<ClientEvent> {
   advance(now: number): void {
     if (this.#inHandshake() && now >= this.#handshakeDeadline)
       this.#close({ kind: "timeout" });
+    if (this.#inHandshake() && now >= this.#handshakeResendAt)
+      this.#sendHandshake(this.#handshakeDatagram, now);
     if (this.#state === "connected" && now >= this.#sendSteps.next) {
       this.#step++;
       for (const data of this.#outbox.flush(this.#step))
@@ -113,7 +129,8 @@ export class ClientEngine implements Engine<ClientEvent> {
   }
 
   nextDeadline(): number | undefined {
-    if (this.#inHandshake()) return this.#handshakeDeadline;
+    if (this.#inHandshake())
+      return Math.min(this.#handshakeDeadline, this.#handshakeResendAt);
     if (this.#state === "connected") return this.#sendSteps.next;
     return undefined;
   }
@@ -128,6 +145,13 @@ export class ClientEngine implements Engine<ClientEvent> {
     const events = this.#events;
     this.#events = [];
     return events;
+  }
+
+  /** Sends a Handshake Datagram now, and again at every resend interval until the next step of the Handshake. */
+  #sendHandshake(data: Uint8Array, now: number): void {
+    this.#handshakeDatagram = data;
+    this.#handshakeResendAt = now + HANDSHAKE_RESEND_INTERVAL;
+    this.#datagrams.push({ to: this.#server, data });
   }
 
   #inHandshake(): boolean {
