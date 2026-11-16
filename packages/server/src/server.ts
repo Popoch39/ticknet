@@ -10,6 +10,7 @@ import {
   type ServerEvent,
   type Transport,
 } from "@ticknet/core";
+import { openUdpTransport, realClock, resolveHost } from "./bun-adapter";
 
 /** What the authentication callback is given about a Client that proved its address. */
 export interface AuthenticationRequest {
@@ -35,8 +36,14 @@ export type Authenticate<Data> = (
 ) => AuthenticationDecision<Data> | Promise<AuthenticationDecision<Data>>;
 
 export interface ServerOptions {
-  readonly transport: Transport;
-  readonly clock: Clock;
+  /** The UDP port to listen on; by default one the system picks, read back from `Server.port`. */
+  readonly port?: number;
+  /** The host name or IP address to listen on; every IPv4 interface by default. */
+  readonly host?: string;
+  /** Replaces the UDP socket, for tests on a simulated network; `port` and `host` are then unused. */
+  readonly transport?: Transport;
+  /** Replaces real time, for tests with a manual Clock. */
+  readonly clock?: Clock;
   /** Ticks per second; 30 by default. */
   readonly tickRate?: number;
   /**
@@ -111,6 +118,8 @@ export class Server<Data = undefined> {
     tick: new Set(),
     error: new Set(),
   };
+  /** The UDP port the Server listens on; undefined with an injected Transport. */
+  readonly port: number | undefined;
   readonly #engine: ServerEngine;
   readonly #driver: EngineDriver<ServerEvent>;
   readonly #authenticate: (
@@ -122,13 +131,17 @@ export class Server<Data = undefined> {
     this.#report(error),
   );
 
-  /** Use `startServer`. */
+  /** Use `startServer`, which opens the Transport. */
   constructor(
     options: ServerOptions,
     authenticate: (
       request: AuthenticationRequest,
     ) => Decision<Data> | Promise<Decision<Data>>,
+    transport: Transport,
+    clock: Clock,
+    port?: number,
   ) {
+    this.port = port;
     this.#authenticate = authenticate;
     this.#engine = new ServerEngine(
       {
@@ -137,39 +150,33 @@ export class Server<Data = undefined> {
         maxConnections: options.maxConnections ?? 64,
         timeout: options.timeout ?? 10_000,
       },
-      options.clock.now(),
+      clock.now(),
     );
-    this.#driver = new EngineDriver(
-      this.#engine,
-      options.transport,
-      options.clock,
-      (event) => {
-        switch (event.type) {
-          case "authenticationRequested":
-            this.#authenticateClient(event.connection, {
-              address: event.address,
-              authToken: event.authToken,
-            });
-            break;
-          case "connectionOpened": {
-            const connection = this.#connections.get(event.connection);
-            if (!connection) break;
-            for (const listener of this.#listeners.connectionOpened)
-              listener(connection);
-            break;
-          }
-          case "tick":
-            for (const listener of this.#listeners.tick) listener(event.tick);
-            break;
-          case "message": {
-            const connection = this.#connections.get(event.connection);
-            if (connection)
-              this.#router.route(event.id, event.body, connection);
-            break;
-          }
+    this.#driver = new EngineDriver(this.#engine, transport, clock, (event) => {
+      switch (event.type) {
+        case "authenticationRequested":
+          this.#authenticateClient(event.connection, {
+            address: event.address,
+            authToken: event.authToken,
+          });
+          break;
+        case "connectionOpened": {
+          const connection = this.#connections.get(event.connection);
+          if (!connection) break;
+          for (const listener of this.#listeners.connectionOpened)
+            listener(connection);
+          break;
         }
-      },
-    );
+        case "tick":
+          for (const listener of this.#listeners.tick) listener(event.tick);
+          break;
+        case "message": {
+          const connection = this.#connections.get(event.connection);
+          if (connection) this.#router.route(event.id, event.body, connection);
+          break;
+        }
+      }
+    });
   }
 
   on<E extends keyof ServerEvents<Data>>(
@@ -193,6 +200,14 @@ export class Server<Data = undefined> {
    */
   broadcast<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#engine.broadcast(type.id, type.encode(value), delivery);
+  }
+
+  /**
+   * Stops ticking and releases the socket and timers, so that the process
+   * can exit and the port can be reused. Clients are not told yet.
+   */
+  stop(): void {
+    this.#driver.stop();
   }
 
   #authenticateClient(
@@ -266,7 +281,11 @@ export class Server<Data = undefined> {
   }
 }
 
-/** Starts a Server that accepts every Client completing the Handshake. */
+/**
+ * Starts a Server that accepts every Client completing the Handshake. It
+ * listens on a UDP socket unless a Transport is given, and resolves once it is
+ * ready to accept Clients.
+ */
 export function startServer(
   options: ServerOptions & { readonly authenticate?: undefined },
 ): Promise<Server<undefined>>;
@@ -281,14 +300,27 @@ export function startServer<Data>(
 export async function startServer(
   options: ServerOptions & { readonly authenticate?: Authenticate<unknown> },
 ): Promise<Server<unknown> | Server<undefined>> {
-  const authenticate = options.authenticate;
-  return new Server<unknown>(options, (request) => {
-    if (!authenticate) return { accept: true, data: undefined };
-    const decision = authenticate(request);
+  const authenticate = (
+    request: AuthenticationRequest,
+  ): Decision<unknown> | Promise<Decision<unknown>> => {
+    if (!options.authenticate) return { accept: true, data: undefined };
+    const decision = options.authenticate(request);
     return decision instanceof Promise
       ? decision.then(withData)
       : withData(decision);
-  });
+  };
+  const clock = options.clock ?? realClock;
+  if (options.transport)
+    return new Server<unknown>(options, authenticate, options.transport, clock);
+  const hostname = await resolveHost(options.host ?? "0.0.0.0");
+  const socket = await openUdpTransport(hostname, options.port ?? 0);
+  return new Server<unknown>(
+    options,
+    authenticate,
+    socket.transport,
+    clock,
+    socket.port,
+  );
 }
 
 function withData(

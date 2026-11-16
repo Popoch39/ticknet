@@ -27,6 +27,7 @@ export {
   type ServerEngineConfig,
   type ServerEvent,
 } from "./server-engine";
+export { SocketTransport, type DatagramSocket } from "./socket-transport";
 export type {
   Address,
   OutgoingDatagram,

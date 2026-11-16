@@ -33,6 +33,7 @@ export class EngineDriver<Event> {
   #wakeAt: number | undefined;
   #cancelWake: (() => void) | undefined;
   #pumping = false;
+  #stopped = false;
 
   constructor(
     engine: Engine<Event>,
@@ -64,11 +65,26 @@ export class EngineDriver<Event> {
     if (!this.#pumping) this.#pump();
   }
 
+  /**
+   * Closes the Transport and stops waking the engine, which then sends,
+   * receives and raises nothing more. Releasing the Transport and the Clock
+   * this way lets the process exit.
+   */
+  stop(): void {
+    if (this.#stopped) return;
+    this.#stopped = true;
+    this.#cancelWake?.();
+    this.#cancelWake = undefined;
+    this.#wakeAt = undefined;
+    this.#transport.close();
+  }
+
   #pump(): void {
     this.#pumping = true;
     try {
-      // Handling an event may queue more output, so drain until both queues are empty.
-      for (;;) {
+      // Handling an event may queue more output, so drain until both queues
+      // are empty; an event handler may also stop the driver.
+      while (!this.#stopped) {
         const datagrams = this.#engine.pollDatagrams();
         if (datagrams.length > 0) this.#transport.send(datagrams);
         const events = this.#engine.pollEvents();
@@ -82,6 +98,7 @@ export class EngineDriver<Event> {
   }
 
   #scheduleWake(): void {
+    if (this.#stopped) return;
     const at = this.#engine.nextDeadline();
     if (at === this.#wakeAt) return;
     this.#cancelWake?.();

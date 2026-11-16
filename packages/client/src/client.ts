@@ -2,19 +2,26 @@ import {
   ClientEngine,
   EngineDriver,
   MessageRouter,
+  type ClientEvent,
   type Clock,
   type CloseReason,
   type DeliveryMode,
   type MessageType,
   type Transport,
 } from "@ticknet/core";
+import { openUdpTransport, realClock, resolveHost } from "./bun-adapter";
 
 export interface ClientOptions {
-  /** The Server's host, as the Transport addresses it. */
+  /**
+   * The Server's host name or IP address. With an injected Transport, it is
+   * used as is, as that Transport addresses the Server.
+   */
   readonly host: string;
   readonly port: number;
-  readonly transport: Transport;
-  readonly clock: Clock;
+  /** Replaces the UDP socket, for tests on a simulated network. */
+  readonly transport?: Transport;
+  /** Replaces real time, for tests with a manual Clock. */
+  readonly clock?: Clock;
   /** Milliseconds to wait for the Server before giving up; 10 seconds by default. */
   readonly timeout?: number;
   /** How many times per second queued Messages are sent; 30 by default. */
@@ -27,12 +34,24 @@ export interface ClientOptions {
   readonly authToken?: Uint8Array;
 }
 
+/**
+ * Why `connect` failed: the Connection never opened, or the Server's host
+ * name could not be resolved to an address.
+ */
+export type ConnectFailure =
+  CloseReason | { readonly kind: "hostNotFound"; readonly host: string };
+
 /** Why `connect` failed. */
 export class ConnectError extends Error {
-  readonly reason: CloseReason;
+  readonly reason: ConnectFailure;
 
-  constructor(reason: CloseReason) {
-    super(`Could not connect to the Server: ${reason.kind}`);
+  constructor(reason: ConnectFailure, options?: ErrorOptions) {
+    super(
+      reason.kind === "hostNotFound"
+        ? `Could not connect to the Server: no address found for ${reason.host}`
+        : `Could not connect to the Server: ${reason.kind}`,
+      options,
+    );
     this.name = "ConnectError";
     this.reason = reason;
   }
@@ -53,15 +72,18 @@ export class Client {
   readonly #engine: ClientEngine;
   readonly #router: MessageRouter<void>;
   readonly #listeners: Listeners;
+  readonly #driver: EngineDriver<ClientEvent>;
 
   constructor(
     engine: ClientEngine,
     router: MessageRouter<void>,
     listeners: Listeners,
+    driver: EngineDriver<ClientEvent>,
   ) {
     this.#engine = engine;
     this.#router = router;
     this.#listeners = listeners;
+    this.#driver = driver;
   }
 
   /**
@@ -88,34 +110,77 @@ export class Client {
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#engine.send(type.id, type.encode(value), delivery);
   }
+
+  /**
+   * Releases the socket and timers, so that the process can exit. The Server
+   * is not told yet.
+   */
+  close(): void {
+    this.#driver.stop();
+  }
 }
 
 /**
  * Connects to a Server and resolves once the Handshake is complete, or
- * rejects with a ConnectError.
+ * rejects with a ConnectError. Unless a Transport is given, the host name is
+ * resolved first and a UDP socket is opened.
  */
-export function connect(options: ClientOptions): Promise<Client> {
-  return new Promise((resolve, reject) => {
-    const engine = new ClientEngine(
-      {
-        server: { host: options.host, port: options.port },
-        timeout: options.timeout ?? 10_000,
-        sendRate: options.sendRate ?? 30,
-        authToken: options.authToken,
-      },
-      options.clock.now(),
+export async function connect(options: ClientOptions): Promise<Client> {
+  const clock = options.clock ?? realClock;
+  // Nothing is awaited on this path, so the first Datagram leaves at once.
+  if (options.transport)
+    return handshake(options, options.host, options.transport, clock);
+  let host: string;
+  try {
+    host = await resolveHost(options.host);
+  } catch (error) {
+    throw new ConnectError(
+      { kind: "hostNotFound", host: options.host },
+      { cause: error },
     );
+  }
+  const socket = await openUdpTransport(
+    host.includes(":") ? "::" : "0.0.0.0",
+    0,
+  );
+  return handshake(options, host, socket.transport, clock);
+}
+
+function handshake(
+  options: ClientOptions,
+  host: string,
+  transport: Transport,
+  clock: Clock,
+): Promise<Client> {
+  return new Promise((resolve, reject) => {
+    let engine: ClientEngine;
+    try {
+      engine = new ClientEngine(
+        {
+          server: { host, port: options.port },
+          timeout: options.timeout ?? 10_000,
+          sendRate: options.sendRate ?? 30,
+          authToken: options.authToken,
+        },
+        clock.now(),
+      );
+    } catch (error) {
+      // Invalid options: the socket is already open and must not keep the process alive.
+      transport.close();
+      throw error;
+    }
     const listeners: Listeners = { error: new Set() };
     const router = new MessageRouter<void>((error) => {
       if (listeners.error.size === 0) console.error(error);
       for (const listener of listeners.error) listener(error);
     });
-    new EngineDriver(engine, options.transport, options.clock, (event) => {
+    const driver = new EngineDriver(engine, transport, clock, (event) => {
       switch (event.type) {
         case "connectionOpened":
-          resolve(new Client(engine, router, listeners));
+          resolve(new Client(engine, router, listeners, driver));
           break;
         case "connectionClosed":
+          driver.stop();
           reject(new ConnectError(event.reason));
           break;
         case "message":
