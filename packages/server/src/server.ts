@@ -6,12 +6,20 @@ import {
   type Clock,
   type DeliveryMode,
   type MessageType,
+  type ServerEvent,
   type Transport,
 } from "@ticknet/core";
+import { openUdpTransport, realClock, resolveHost } from "./bun-adapter";
 
 export interface ServerOptions {
-  readonly transport: Transport;
-  readonly clock: Clock;
+  /** The UDP port to listen on; by default one the system picks, read back from `Server.port`. */
+  readonly port?: number;
+  /** The host name or IP address to listen on; every IPv4 interface by default. */
+  readonly host?: string;
+  /** Replaces the UDP socket, for tests on a simulated network; `port` and `host` are then unused. */
+  readonly transport?: Transport;
+  /** Replaces real time, for tests with a manual Clock. */
+  readonly clock?: Clock;
   /** Ticks per second; 30 by default. */
   readonly tickRate?: number;
 }
@@ -59,22 +67,32 @@ export class Server {
     tick: new Set(),
     error: new Set(),
   };
+  /** The UDP port the Server listens on; undefined with an injected Transport. */
+  readonly port: number | undefined;
   readonly #engine: ServerEngine;
+  readonly #driver: EngineDriver<ServerEvent>;
   readonly #connections = new Map<number, Connection>();
   readonly #router = new MessageRouter<Connection>((error) =>
     this.#report(error),
   );
 
-  constructor(options: ServerOptions) {
+  /** Use `startServer`, which opens the Transport. */
+  constructor(
+    options: ServerOptions,
+    transport: Transport,
+    clock: Clock,
+    port?: number,
+  ) {
+    this.port = port;
     const engine = new ServerEngine(
       {
         secret: crypto.getRandomValues(new Uint8Array(16)),
         tickRate: options.tickRate ?? 30,
       },
-      options.clock.now(),
+      clock.now(),
     );
     this.#engine = engine;
-    new EngineDriver(engine, options.transport, options.clock, (event) => {
+    this.#driver = new EngineDriver(engine, transport, clock, (event) => {
       switch (event.type) {
         case "connectionOpened": {
           const connection = new Connection(
@@ -119,12 +137,29 @@ export class Server {
     this.#engine.broadcast(type.id, type.encode(value), delivery);
   }
 
+  /**
+   * Stops ticking and releases the socket and timers, so that the process
+   * can exit and the port can be reused. Clients are not told yet.
+   */
+  stop(): void {
+    this.#driver.stop();
+  }
+
   #report(error: Error): void {
     if (this.#listeners.error.size === 0) console.error(error);
     for (const listener of this.#listeners.error) listener(error);
   }
 }
 
+/**
+ * Starts a Server, listening on a UDP socket unless a Transport is given,
+ * and resolves once it is ready to accept Clients.
+ */
 export async function startServer(options: ServerOptions): Promise<Server> {
-  return new Server(options);
+  const clock = options.clock ?? realClock;
+  if (options.transport)
+    return new Server(options, options.transport, clock, undefined);
+  const hostname = await resolveHost(options.host ?? "0.0.0.0");
+  const socket = await openUdpTransport(hostname, options.port ?? 0);
+  return new Server(options, socket.transport, clock, socket.port);
 }

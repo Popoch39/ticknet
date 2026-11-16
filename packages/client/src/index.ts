@@ -16,4 +16,5 @@ export {
   connect,
   type ClientEvents,
   type ClientOptions,
+  type ConnectFailure,
 } from "./client";
