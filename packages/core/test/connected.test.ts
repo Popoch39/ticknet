@@ -3,6 +3,7 @@ import {
   ClientEngine,
   ServerEngine,
   type Address,
+  type DeliveryMode,
   type ServerEvent,
 } from "@ticknet/core";
 
@@ -48,9 +49,9 @@ const SENT: { id: number; body: Uint8Array }[] = [
 ];
 
 /** The one Datagram a connected Client puts on the network for SENT. */
-function clientDatagram(): Uint8Array {
+function clientDatagram(delivery: DeliveryMode = "unreliable"): Uint8Array {
   const { client } = connectedPair();
-  for (const { id, body } of SENT) client.send(id, body, "unreliable");
+  for (const { id, body } of SENT) client.send(id, body, delivery);
   client.advance(100);
   const [datagram, ...others] = client.pollDatagrams();
   if (!datagram || others.length > 0)
@@ -92,14 +93,30 @@ test("whatever prefix of a connected Datagram arrives, no partial Message is eve
     expect(SENT).toContainEqual(message);
 });
 
+test("whatever prefix of a connected Datagram of Sequenced Messages arrives, no partial Message is ever delivered", () => {
+  const data = clientDatagram("sequenced");
+  const whole = connectedPair().server;
+  const cut = connectedPair().server;
+
+  whole.receive(data, CLIENT, 0);
+  cut.receive(data.slice(0, -1), CLIENT, 0);
+  expect(messagesIn(whole.pollEvents())).toEqual(SENT);
+  expect(messagesIn(cut.pollEvents())).toEqual([]);
+
+  for (let size = 0; size < data.byteLength; size++)
+    cut.receive(data.slice(0, size), CLIENT, 0);
+  for (const message of messagesIn(cut.pollEvents()))
+    expect(SENT).toContainEqual(message);
+});
+
 test("a connected Datagram with a Message claiming more bytes than remain, or of an unknown entry type, is dropped", () => {
   const data = clientDatagram();
   const { server } = connectedPair();
-  // The first entry starts after the six-byte header: a type byte, the id, then the body length.
+  // The first entry starts after the ten-byte header: a type byte, the id, then the body length.
   const overrunning = data.slice();
-  new DataView(overrunning.buffer).setUint16(6 + 3, 0xffff);
+  new DataView(overrunning.buffer).setUint16(10 + 3, 0xffff);
   const unknownEntry = data.slice();
-  unknownEntry[6] = 0xff;
+  unknownEntry[10] = 0xff;
 
   server.receive(overrunning, CLIENT, 0);
   server.receive(unknownEntry, CLIENT, 0);

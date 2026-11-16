@@ -206,6 +206,24 @@ test("an echo replayed while the Client is being authenticated asks for authenti
   ]);
 });
 
+test("an echo resent after the Server gave up waiting for its authentication does not ask again", () => {
+  const server = new ServerEngine(
+    { secret: SECRET, tickRate: 30, maxConnections: 64, timeout: 3000 },
+    0,
+  );
+  const echo = onlyDatagram(clientReadyToEcho(server));
+  server.receive(echo, CLIENT, 0);
+  expect(server.pollEvents()).toMatchObject([
+    { type: "authenticationRequested", address: CLIENT },
+  ]);
+
+  server.advance(3000);
+  server.receive(echo, CLIENT, 3000);
+
+  expect(server.pollEvents().filter(({ type }) => type !== "tick")).toEqual([]);
+  expect(server.pollDatagrams()).toEqual([]);
+});
+
 test("no Datagram sent to an unproven address is larger than the Datagram that triggered it", () => {
   const request = onlyDatagram(newClient());
   const echo = onlyDatagram(clientReadyToEcho(newServer()));

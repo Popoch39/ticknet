@@ -15,12 +15,18 @@ const CHALLENGE_LIFETIME = 5_000;
  */
 export class Challenger {
   readonly #secret: Uint8Array;
+  readonly #maxAge: number;
 
-  /** `secret` is 16 random bytes, known only to this Server. */
-  constructor(secret: Uint8Array) {
+  /**
+   * `secret` is 16 random bytes, known only to this Server. An echo is
+   * accepted up to `maxAge` whole milliseconds after issue, and never later
+   * than CHALLENGE_LIFETIME.
+   */
+  constructor(secret: Uint8Array, maxAge = CHALLENGE_LIFETIME) {
     if (secret.byteLength !== 16)
       throw new RangeError("The challenge secret must be 16 bytes long");
     this.#secret = secret.slice();
+    this.#maxAge = Math.min(maxAge, CHALLENGE_LIFETIME);
   }
 
   issue(to: Address, now: number): Uint8Array {
@@ -40,7 +46,7 @@ export class Challenger {
     ).getUint32(0);
     // Wrapping subtraction, so that the 32-bit time of issue may roll over.
     const age = (millisecondsMod32(now) - issuedAt) >>> 0;
-    if (age > CHALLENGE_LIFETIME) return false;
+    if (age > this.#maxAge) return false;
     return equalInConstantTime(
       this.#tag(from, issuedAt),
       challenge.subarray(4),

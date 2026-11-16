@@ -8,6 +8,8 @@ import {
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { keepaliveInterval, Outbox } from "./outbox";
+import { ReceivedSequences } from "./received-sequences";
+import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 export type ClientEvent =
@@ -19,9 +21,18 @@ export type ClientEvent =
       readonly body: Uint8Array;
     };
 
+/**
+ * Milliseconds between two copies of an unanswered Handshake Datagram, so
+ * that a lost one only delays the Handshake.
+ */
+const HANDSHAKE_RESEND_INTERVAL = 100;
+
 export interface ClientEngineConfig {
   readonly server: Address;
-  /** Milliseconds the Handshake may take before the attempt closes with a timeout reason. */
+  /**
+   * Milliseconds the Handshake may take, and then that may pass without
+   * anything from the Server, before the Client closes with a timeout reason.
+   */
   readonly timeout: number;
   /** How many times per second the Client puts its queued Messages on the network. */
   readonly sendRate: number;
@@ -44,7 +55,12 @@ export class ClientEngine implements Engine<ClientEvent> {
   readonly #sendSteps: Cadence;
   #state: "requesting" | "echoing" | "connected" | "closed" = "requesting";
   #closeReason: CloseReason | undefined;
+  /** The Handshake Datagram of the current step, sent again until the Server answers it. */
+  #handshakeDatagram: Uint8Array;
+  #handshakeResendAt: number;
   readonly #outbox: Outbox;
+  readonly #received = new ReceivedSequences();
+  readonly #sequenced = new SequencedOrder();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
   #lastServerTick: number | undefined;
@@ -65,10 +81,9 @@ export class ClientEngine implements Engine<ClientEvent> {
     this.#outbox = new Outbox(keepaliveInterval(config.timeout), now);
     this.#handshakeDeadline = now + config.timeout;
     this.#sendSteps = new Cadence(now, config.sendRate, "send rate");
-    this.#datagrams.push({
-      to: config.server,
-      data: encodeDatagram({ kind: "connectRequest" }),
-    });
+    this.#handshakeDatagram = encodeDatagram({ kind: "connectRequest" });
+    this.#handshakeResendAt = now + HANDSHAKE_RESEND_INTERVAL;
+    this.#datagrams.push({ to: config.server, data: this.#handshakeDatagram });
   }
 
   /** The highest Tick number found on a Datagram from the Server, if any arrived. */
@@ -115,14 +130,14 @@ export class ClientEngine implements Engine<ClientEvent> {
       case "challenge":
         if (this.#state !== "requesting") break;
         this.#state = "echoing";
-        this.#datagrams.push({
-          to: this.#server,
-          data: encodeDatagram({
+        this.#sendHandshake(
+          encodeDatagram({
             kind: "challengeResponse",
             challenge: datagram.challenge,
             authToken: this.#authToken,
           }),
-        });
+          now,
+        );
         break;
       case "accepted":
         if (this.#state !== "echoing") break;
@@ -135,15 +150,24 @@ export class ClientEngine implements Engine<ClientEvent> {
         if (this.#inHandshake()) this.#close(datagram.reason);
         break;
       case "connected":
-        if (this.#state !== "connected") break;
+        if (
+          this.#state !== "connected" ||
+          !this.#received.accept(datagram.sequence)
+        )
+          break;
         this.#silenceDeadline = now + this.#timeout;
         if (
           this.#lastServerTick === undefined ||
           datagram.tick > this.#lastServerTick
         )
           this.#lastServerTick = datagram.tick;
-        for (const { id, body } of datagram.messages)
-          this.#events.push({ type: "message", id, body });
+        for (const message of datagram.messages)
+          if (this.#sequenced.admit(message))
+            this.#events.push({
+              type: "message",
+              id: message.id,
+              body: message.body,
+            });
         break;
       case "close":
         // A Client never closes the Server's side; only the Server's own notice counts.
@@ -159,6 +183,8 @@ export class ClientEngine implements Engine<ClientEvent> {
   advance(now: number): void {
     if (this.#inHandshake() && now >= this.#handshakeDeadline)
       this.#close({ kind: "timeout" });
+    if (this.#inHandshake() && now >= this.#handshakeResendAt)
+      this.#sendHandshake(this.#handshakeDatagram, now);
     if (this.#state === "connected" && now >= this.#silenceDeadline)
       this.#close({ kind: "timeout" });
     if (this.#state === "connected" && now >= this.#sendSteps.next) {
@@ -171,7 +197,8 @@ export class ClientEngine implements Engine<ClientEvent> {
   }
 
   nextDeadline(): number | undefined {
-    if (this.#inHandshake()) return this.#handshakeDeadline;
+    if (this.#inHandshake())
+      return Math.min(this.#handshakeDeadline, this.#handshakeResendAt);
     if (this.#state === "connected")
       return Math.min(this.#sendSteps.next, this.#silenceDeadline);
     return undefined;
@@ -187,6 +214,13 @@ export class ClientEngine implements Engine<ClientEvent> {
     const events = this.#events;
     this.#events = [];
     return events;
+  }
+
+  /** Sends a Handshake Datagram now, and again at every resend interval until the next step of the Handshake. */
+  #sendHandshake(data: Uint8Array, now: number): void {
+    this.#handshakeDatagram = data;
+    this.#handshakeResendAt = now + HANDSHAKE_RESEND_INTERVAL;
+    this.#datagrams.push({ to: this.#server, data });
   }
 
   #inHandshake(): boolean {

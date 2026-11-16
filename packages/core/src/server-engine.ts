@@ -9,6 +9,8 @@ import {
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { assertFitsInDatagram, keepaliveInterval, Outbox } from "./outbox";
+import { ReceivedSequences } from "./received-sequences";
+import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -63,6 +65,8 @@ interface OpenConnection {
   /** The challenge whose echo opened it, which tells a repeated echo from a new attempt. */
   readonly challenge: Uint8Array;
   readonly outbox: Outbox;
+  readonly received: ReceivedSequences;
+  readonly sequenced: SequencedOrder;
 }
 
 /**
@@ -108,7 +112,13 @@ export class ServerEngine implements Engine<ServerEvent> {
   #events: ServerEvent[] = [];
 
   constructor(config: ServerEngineConfig, now: number) {
-    this.#challenger = new Challenger(config.secret);
+    // An authentication starts no earlier than its challenge was issued, so an echo the Client resends
+    // after the Server gave up on it is always too old to ask the game again. Ages are counted in whole
+    // milliseconds, which a full `timeout` always reaches at its floor.
+    this.#challenger = new Challenger(
+      config.secret,
+      Math.floor(config.timeout) - 1,
+    );
     this.#ticks = new Cadence(now, config.tickRate, "Tick rate");
     this.#maxConnections = config.maxConnections;
     this.#timeout = config.timeout;
@@ -132,7 +142,7 @@ export class ServerEngine implements Engine<ServerEvent> {
 
   /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
   broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
-    assertFitsInDatagram(id, body);
+    assertFitsInDatagram(id, body, delivery);
     for (const open of this.#byId.values())
       open.outbox.push(id, body, delivery);
   }
@@ -170,15 +180,16 @@ export class ServerEngine implements Engine<ServerEvent> {
         break;
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
-        if (!open) break;
+        if (!open || !open.received.accept(datagram.sequence)) break;
         this.#heardFrom(open.id, now);
-        for (const { id, body } of datagram.messages)
-          this.#events.push({
-            type: "message",
-            connection: open.id,
-            id,
-            body,
-          });
+        for (const message of datagram.messages)
+          if (open.sequenced.admit(message))
+            this.#events.push({
+              type: "message",
+              connection: open.id,
+              id: message.id,
+              body: message.body,
+            });
         break;
       }
       case "close": {
@@ -205,6 +216,8 @@ export class ServerEngine implements Engine<ServerEvent> {
       address,
       challenge,
       outbox: new Outbox(keepaliveInterval(this.#timeout), now),
+      received: new ReceivedSequences(),
+      sequenced: new SequencedOrder(),
     };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);
