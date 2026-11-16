@@ -15,8 +15,12 @@ export interface MessageType<T> extends MessageDefinition<T> {
   readonly name: string;
 }
 
-/** The guarantee a send asks for. Sequenced and Reliable are not available yet. */
-export type DeliveryMode = "unreliable";
+/**
+ * The guarantee a send asks for. An Unreliable Message may be lost or arrive
+ * out of order; a Sequenced one may be lost, and is dropped if it arrives
+ * after a newer Message of its type. Reliable is not available yet.
+ */
+export type DeliveryMode = "unreliable" | "sequenced";
 
 export const MAX_MESSAGE_ID = 0xffff;
 

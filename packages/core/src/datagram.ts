@@ -38,13 +38,15 @@ const KIND_CHALLENGE_RESPONSE = 3;
 const KIND_ACCEPTED = 4;
 const KIND_REFUSED = 5;
 const KIND_CONNECTED = 6;
+const KIND_CLOSE = 7;
 
 /**
  * A connected Datagram, sent either way on an open Connection: after the
  * common header, the sender's Tick number (32 bits), its sequence number
  * (32 bits), its acknowledgement (newest sequence number received, 32 bits;
  * received mask, 32 bits; delay in milliseconds, 16 bits), then Message
- * entries up to the end.
+ * entries up to the end. One with no entry at all is a keepalive or an
+ * acknowledgement on its own.
  */
 const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4 + 4 + 4 + 4 + 2;
 
@@ -52,16 +54,28 @@ const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4 + 4 + 4 + 4 + 2;
 const MAX_ACKNOWLEDGEMENT_DELAY = 0xffff;
 
 /**
- * Each Message entry is a type byte, the Message id (16 bits), the body length
- * (16 bits), then the body. The type byte leaves room for Sequenced, Reliable
- * and Fragment entries with headers of their own.
+ * Each Message entry is a type byte, the Message id (16 bits), the type's own
+ * fields, the body length (16 bits), then the body. An Unreliable entry has no
+ * fields of its own; a Sequenced entry has its sequence number (16 bits). The
+ * type byte leaves room for Reliable and Fragment entries.
  */
 const ENTRY_UNRELIABLE = 1;
-const ENTRY_HEADER_SIZE = 5;
+const ENTRY_SEQUENCED = 2;
+const UNRELIABLE_HEADER_SIZE = 5;
+const SEQUENCED_HEADER_SIZE = 7;
 
-/** The largest Message body that fits in one Datagram. */
+/**
+ * Sequenced sequence numbers count modulo 2^16, per Message type, so a
+ * long-running Connection wraps them: they are compared with `isNewer`.
+ */
+export const SEQUENCED_SEQUENCE_MASK = 0xffff;
+
+/**
+ * The largest Message body that fits in one Datagram, whatever its Delivery
+ * mode, so that the limit does not depend on how a Message is sent.
+ */
 export const MAX_DATAGRAM_MESSAGE_SIZE =
-  MAX_DATAGRAM_SIZE - CONNECTED_HEADER_SIZE - ENTRY_HEADER_SIZE;
+  MAX_DATAGRAM_SIZE - CONNECTED_HEADER_SIZE - SEQUENCED_HEADER_SIZE;
 
 /** The reasons a Server can refuse a Client for, before any Connection exists. */
 type RefusalReason = Extract<
@@ -77,10 +91,40 @@ const REFUSED_SERVER_FULL = 3;
 const REFUSED_SIZE = HEADER_SIZE + 1;
 const REFUSED_DENIED_SIZE = REFUSED_SIZE + 2;
 
-export interface MessageEntry {
-  readonly delivery: DeliveryMode;
-  readonly id: number;
-  readonly body: Uint8Array;
+/** The reasons one side of an open Connection can tell the other it closed it for. */
+type CloseNoticeReason = Extract<
+  CloseReason,
+  { kind: "closedByClient" | "closedByServer" }
+>;
+
+const CLOSED_BY_CLIENT = 1;
+const CLOSED_BY_SERVER = 2;
+
+/** A close notice is its reason byte, followed by the game's 16-bit code when the Server closed. */
+const CLOSED_BY_CLIENT_SIZE = HEADER_SIZE + 1;
+const CLOSED_BY_SERVER_SIZE = CLOSED_BY_CLIENT_SIZE + 2;
+
+export type MessageEntry =
+  | {
+      readonly delivery: Exclude<DeliveryMode, "sequenced">;
+      readonly id: number;
+      readonly body: Uint8Array;
+    }
+  | {
+      readonly delivery: "sequenced";
+      readonly id: number;
+      /** Counts the Sequenced Messages of this type one side sent on one Connection, wrapping at 2^16. */
+      readonly sequence: number;
+      readonly body: Uint8Array;
+    };
+
+/**
+ * Whether Sequenced sequence number `a` was sent after `b`: it is, when it is
+ * less than half the sequence space ahead of `b`, counting across the wrap.
+ */
+export function isNewer(a: number, b: number): boolean {
+  const ahead = (a - b) & SEQUENCED_SEQUENCE_MASK;
+  return ahead !== 0 && ahead <= SEQUENCED_SEQUENCE_MASK >>> 1;
 }
 
 /**
@@ -121,7 +165,9 @@ export type Datagram =
       readonly sequence: number;
       readonly acknowledgement: Acknowledgement;
       readonly messages: readonly MessageEntry[];
-    };
+    }
+  /** Tells the other side of an open Connection that it is over. */
+  | { readonly kind: "close"; readonly reason: CloseNoticeReason };
 
 export type ConnectedDatagram = Extract<Datagram, { kind: "connected" }>;
 
@@ -154,7 +200,38 @@ export function encodeDatagram(datagram: Datagram): Uint8Array {
       return encodeRefused(datagram.reason);
     case "connected":
       return encodeConnected(datagram);
+    case "close":
+      return datagram.reason.kind === "closedByClient"
+        ? withHeader(
+            KIND_CLOSE,
+            CLOSED_BY_CLIENT_SIZE,
+            Uint8Array.of(CLOSED_BY_CLIENT),
+          )
+        : withHeader(
+            KIND_CLOSE,
+            CLOSED_BY_SERVER_SIZE,
+            Uint8Array.of(
+              CLOSED_BY_SERVER,
+              datagram.reason.code >>> 8,
+              datagram.reason.code & 0xff,
+            ),
+          );
   }
+}
+
+function decodeClose(data: Uint8Array): Datagram | undefined {
+  const reason = data[HEADER_SIZE];
+  if (data.byteLength === CLOSED_BY_CLIENT_SIZE && reason === CLOSED_BY_CLIENT)
+    return { kind: "close", reason: { kind: "closedByClient" } };
+  if (
+    data.byteLength === CLOSED_BY_SERVER_SIZE &&
+    reason === CLOSED_BY_SERVER
+  ) {
+    const code =
+      ((data[HEADER_SIZE + 1] ?? 0) << 8) | (data[HEADER_SIZE + 2] ?? 0);
+    return { kind: "close", reason: { kind: "closedByServer", code } };
+  }
+  return undefined;
 }
 
 function encodeRefused(reason: RefusalReason): Uint8Array {
@@ -198,7 +275,11 @@ function decodeRefused(data: Uint8Array): Datagram | undefined {
 
 /** The bytes `message` takes in a connected Datagram. */
 function entrySize(message: MessageEntry): number {
-  return ENTRY_HEADER_SIZE + message.body.byteLength;
+  const header =
+    message.delivery === "sequenced"
+      ? SEQUENCED_HEADER_SIZE
+      : UNRELIABLE_HEADER_SIZE;
+  return header + message.body.byteLength;
 }
 
 /**
@@ -250,11 +331,20 @@ function encodeConnected({
   );
   let offset = CONNECTED_HEADER_SIZE;
   for (const message of messages) {
-    view.setUint8(offset, ENTRY_UNRELIABLE);
     view.setUint16(offset + 1, message.id);
-    view.setUint16(offset + 3, message.body.byteLength);
-    data.set(message.body, offset + ENTRY_HEADER_SIZE);
-    offset += entrySize(message);
+    let bodyStart: number;
+    if (message.delivery === "sequenced") {
+      view.setUint8(offset, ENTRY_SEQUENCED);
+      view.setUint16(offset + 3, message.sequence);
+      view.setUint16(offset + 5, message.body.byteLength);
+      bodyStart = offset + SEQUENCED_HEADER_SIZE;
+    } else {
+      view.setUint8(offset, ENTRY_UNRELIABLE);
+      view.setUint16(offset + 3, message.body.byteLength);
+      bodyStart = offset + UNRELIABLE_HEADER_SIZE;
+    }
+    data.set(message.body, bodyStart);
+    offset = bodyStart + message.body.byteLength;
   }
   return data;
 }
@@ -265,16 +355,31 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
   const messages: MessageEntry[] = [];
   let offset = CONNECTED_HEADER_SIZE;
   while (offset < data.byteLength) {
-    if (offset + ENTRY_HEADER_SIZE > data.byteLength) return undefined;
-    if (view.getUint8(offset) !== ENTRY_UNRELIABLE) return undefined;
-    const bodyStart = offset + ENTRY_HEADER_SIZE;
-    const bodyEnd = bodyStart + view.getUint16(offset + 3);
+    const type = view.getUint8(offset);
+    const headerSize =
+      type === ENTRY_UNRELIABLE
+        ? UNRELIABLE_HEADER_SIZE
+        : type === ENTRY_SEQUENCED
+          ? SEQUENCED_HEADER_SIZE
+          : undefined;
+    if (headerSize === undefined || offset + headerSize > data.byteLength)
+      return undefined;
+    const id = view.getUint16(offset + 1);
+    const bodyStart = offset + headerSize;
+    // The body length closes every entry header, whatever the entry type.
+    const bodyEnd = bodyStart + view.getUint16(bodyStart - 2);
     if (bodyEnd > data.byteLength) return undefined;
-    messages.push({
-      delivery: "unreliable",
-      id: view.getUint16(offset + 1),
-      body: data.slice(bodyStart, bodyEnd),
-    });
+    const body = data.slice(bodyStart, bodyEnd);
+    messages.push(
+      type === ENTRY_SEQUENCED
+        ? {
+            delivery: "sequenced",
+            id,
+            sequence: view.getUint16(offset + 3),
+            body,
+          }
+        : { delivery: "unreliable", id, body },
+    );
     offset = bodyEnd;
   }
   return {
@@ -316,6 +421,8 @@ export function decodeDatagram(
       return decodeRefused(data);
     case KIND_CONNECTED:
       return decodeConnected(data);
+    case KIND_CLOSE:
+      return decodeClose(data);
   }
   return undefined;
 }

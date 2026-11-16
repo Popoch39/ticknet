@@ -5,6 +5,7 @@ import {
   ServerEngine,
   type Address,
   type ConnectionId,
+  type DeliveryMode,
   type ServerEvent,
 } from "@ticknet/core";
 
@@ -38,7 +39,7 @@ function connectedPair() {
   let connection: ConnectionId | undefined;
   for (const event of server.pollEvents())
     if (event.type === "authenticationRequested") {
-      server.accept(event.connection);
+      server.accept(event.connection, 0);
       connection = event.connection;
     }
   if (connection === undefined)
@@ -55,9 +56,9 @@ const SENT: { id: number; body: Uint8Array }[] = [
 ];
 
 /** The one Datagram a connected Client puts on the network for SENT. */
-function clientDatagram(): Uint8Array {
+function clientDatagram(delivery: DeliveryMode = "unreliable"): Uint8Array {
   const { client } = connectedPair();
-  for (const { id, body } of SENT) client.send(id, body, "unreliable");
+  for (const { id, body } of SENT) client.send(id, body, delivery);
   client.advance(100);
   const [datagram, ...others] = client.pollDatagrams();
   if (!datagram || others.length > 0)
@@ -96,6 +97,22 @@ test("whatever prefix of a connected Datagram arrives, no partial Message is eve
     server.receive(data.slice(0, size), CLIENT, 0);
 
   for (const message of messagesIn(server.pollEvents()))
+    expect(SENT).toContainEqual(message);
+});
+
+test("whatever prefix of a connected Datagram of Sequenced Messages arrives, no partial Message is ever delivered", () => {
+  const data = clientDatagram("sequenced");
+  const whole = connectedPair().server;
+  const cut = connectedPair().server;
+
+  whole.receive(data, CLIENT, 0);
+  cut.receive(data.slice(0, -1), CLIENT, 0);
+  expect(messagesIn(whole.pollEvents())).toEqual(SENT);
+  expect(messagesIn(cut.pollEvents())).toEqual([]);
+
+  for (let size = 0; size < data.byteLength; size++)
+    cut.receive(data.slice(0, size), CLIENT, 0);
+  for (const message of messagesIn(cut.pollEvents()))
     expect(SENT).toContainEqual(message);
 });
 

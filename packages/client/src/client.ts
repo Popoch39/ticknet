@@ -22,7 +22,11 @@ export interface ClientOptions {
   readonly transport?: Transport;
   /** Replaces real time, for tests with a manual Clock. */
   readonly clock?: Clock;
-  /** Milliseconds to wait for the Server before giving up; 10 seconds by default. */
+  /**
+   * Milliseconds to wait for the Server before giving up, during the
+   * Handshake and then whenever nothing arrives from it; 10 seconds by
+   * default.
+   */
   readonly timeout?: number;
   /** How many times per second queued Messages are sent; 30 by default. */
   readonly sendRate?: number;
@@ -58,6 +62,13 @@ export class ConnectError extends Error {
 }
 
 export interface ClientEvents {
+  /**
+   * The Connection ended, whichever side ended it: the Client closed it, the
+   * Server closed it or stopped, or nothing arrived from the Server within
+   * the timeout. Runs once, after which the socket and timers are released
+   * and no Message is delivered.
+   */
+  connectionClosed: (reason: CloseReason) => void;
   /**
    * A received Message could not be decoded, or its handler threw. Without
    * a listener, the error is written to the console.
@@ -121,18 +132,20 @@ export class Client {
 
   /**
    * Sends a Message to the Server at the next step of the send rate. Throws
-   * at once if the Message cannot fit in one Datagram.
+   * at once if the Message cannot fit in one Datagram, or if the Connection
+   * has closed.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#engine.send(type.id, type.encode(value), delivery);
   }
 
   /**
-   * Releases the socket and timers, so that the process can exit. The Server
-   * is not told yet.
+   * Leaves the Server on purpose, telling it so, then releases the socket
+   * and timers so that the process can exit. Messages not sent yet are
+   * dropped. Does nothing once the Connection has closed.
    */
   close(): void {
-    this.#driver.stop();
+    this.#driver.perform(() => this.#engine.close());
   }
 }
 
@@ -185,19 +198,28 @@ function handshake(
       transport.close();
       throw error;
     }
-    const listeners: Listeners = { error: new Set() };
+    const listeners: Listeners = {
+      connectionClosed: new Set(),
+      error: new Set(),
+    };
     const router = new MessageRouter<void>((error) => {
       if (listeners.error.size === 0) console.error(error);
       for (const listener of listeners.error) listener(error);
     });
+    let opened = false;
     const driver = new EngineDriver(engine, transport, clock, (event) => {
       switch (event.type) {
         case "connectionOpened":
+          opened = true;
           resolve(new Client(engine, router, listeners, driver));
           break;
         case "connectionClosed":
+          // A closed Client keeps nothing alive; a new connect makes a new Connection.
           driver.stop();
-          reject(new ConnectError(event.reason));
+          if (!opened) reject(new ConnectError(event.reason));
+          else
+            for (const listener of listeners.connectionClosed)
+              listener(event.reason);
           break;
         case "message":
           router.route(event.id, event.body, undefined);

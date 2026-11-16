@@ -4,6 +4,7 @@ export {
   PROTOCOL_VERSION,
   type Address,
   type Clock,
+  type CloseReason,
   type DeliveryMode,
   type MessageCodec,
   type MessageDefinition,

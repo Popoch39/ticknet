@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { ConnectError, connect } from "@ticknet/client";
+import { ConnectError, connect, type CloseReason } from "@ticknet/client";
 import {
   defineMessages,
   startServer,
@@ -88,6 +88,32 @@ test("a stopped Server releases its port, which a new Server can listen on", asy
   second.stop();
 });
 
+test("over real sockets, the Server learns at once that a Client disconnected, and a Client that the Server stopped", async () => {
+  const server = await startServer({});
+  // Only the first opening counts: it is the leaving Client's.
+  const leavingOpened = new Promise<Connection>((resolve) =>
+    server.on("connectionOpened", resolve),
+  );
+  const serverClosed = new Promise<[Connection, CloseReason]>((resolve) =>
+    server.on("connectionClosed", (connection, reason) =>
+      resolve([connection, reason]),
+    ),
+  );
+  const leaving = await connect({ host: "127.0.0.1", port: portOf(server) });
+  const staying = await connect({ host: "127.0.0.1", port: portOf(server) });
+  const stayingClosed = new Promise<CloseReason>((resolve) =>
+    staying.on("connectionClosed", resolve),
+  );
+
+  leaving.close();
+  const [connection, reason] = await serverClosed;
+  expect(connection).toBe(await leavingOpened);
+  expect(reason).toEqual({ kind: "closedByClient" });
+
+  server.stop();
+  expect(await stayingClosed).toEqual({ kind: "closedByServer", code: 0 });
+});
+
 test("an Unreliable Message crosses real sockets in each direction and reaches its typed handler", async () => {
   const messages = defineMessages({
     chat: {
@@ -113,6 +139,35 @@ test("an Unreliable Message crosses real sockets in each direction and reaches i
 
   expect(received).toBe("hello Server");
   expect(await toClient).toBe("hello Client");
+  client.close();
+  server.stop();
+});
+
+test("a Sequenced Message crosses real sockets in each direction and reaches its typed handler", async () => {
+  const messages = defineMessages({
+    position: {
+      id: 1,
+      encode: (value: number) => Uint8Array.of(value),
+      decode: (data: Uint8Array) => data[0] ?? 0,
+    },
+  });
+  const server = await startServer({});
+  const toServer = new Promise<[Connection, number]>((resolve) =>
+    server.onMessage(messages.position, (connection, value) =>
+      resolve([connection, value]),
+    ),
+  );
+  const client = await connect({ host: "127.0.0.1", port: portOf(server) });
+  const toClient = new Promise<number>((resolve) =>
+    client.onMessage(messages.position, resolve),
+  );
+
+  client.send(messages.position, 12, "sequenced");
+  const [connection, received] = await toServer;
+  connection.send(messages.position, 34, "sequenced");
+
+  expect(received).toBe(12);
+  expect(await toClient).toBe(34);
   client.close();
   server.stop();
 });

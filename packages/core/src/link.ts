@@ -9,22 +9,28 @@ import { ReceivedSequences } from "./received-sequences";
 import { SentDatagrams, type ConnectionHealth } from "./sent-datagrams";
 
 /**
- * Milliseconds after which a side with nothing to send still sends a
- * Datagram, so that the other side keeps acknowledging it: the health of an
- * idle Connection stays fresh.
+ * How long an endpoint with nothing to send on a Connection waits before
+ * sending a keepalive, given its own `timeout`: four fit in it, and never
+ * more than a second passes, so that a peer with a shorter timeout still
+ * hears from it in time.
  */
-export const KEEPALIVE_INTERVAL = 1000;
+export function keepaliveInterval(timeout: number): number {
+  return Math.min(1000, timeout / 4);
+}
 
 /**
  * One side of an open Connection, the same on the Server and the Client:
  * the Messages it queued, the connected Datagrams it received, and what the
  * other side acknowledged of those it sent. Every connected Datagram it
- * sends carries an acknowledgement of the most recent ones it received.
+ * sends carries an acknowledgement of the most recent ones it received; a
+ * keepalive is one without Messages, so the other side keeps acknowledging
+ * an idle Connection and its health stays fresh.
  */
 export class Link {
   readonly #outbox = new Outbox();
   readonly #received = new ReceivedSequences();
   readonly #sent = new SentDatagrams();
+  readonly #keepaliveInterval: number;
   #sequence = 0;
   /**
    * Messages arrived since the last Datagram left, so the next flush sends
@@ -32,8 +38,13 @@ export class Link {
    * for one, or two quiet sides would acknowledge each other forever.
    */
   #acknowledgementDue = false;
-  /** When the last Datagram left; undefined until the first flush, which starts the count. */
-  #lastSentAt: number | undefined;
+  #lastSentAt: number;
+
+  /** `now` counts as the last time something was sent. */
+  constructor(keepaliveInterval: number, now: number) {
+    this.#keepaliveInterval = keepaliveInterval;
+    this.#lastSentAt = now;
+  }
 
   get health(): ConnectionHealth {
     return this.#sent.health;
@@ -61,15 +72,15 @@ export class Link {
   /**
    * Empties the queue into connected Datagrams sent at `now`, stamped with
    * the sender's `tick`. With nothing queued, sends one without Messages if
-   * an acknowledgement is due, or as a keepalive if nothing left for
-   * KEEPALIVE_INTERVAL.
+   * an acknowledgement is due, or as a keepalive if nothing left for the
+   * keepalive interval.
    */
   flush(tick: number, now: number): Uint8Array[] {
-    this.#lastSentAt ??= now;
     const groups = this.#outbox.take();
     if (
       groups.length === 0 &&
-      (this.#acknowledgementDue || now - this.#lastSentAt >= KEEPALIVE_INTERVAL)
+      (this.#acknowledgementDue ||
+        now - this.#lastSentAt >= this.#keepaliveInterval)
     )
       groups.push([]);
     this.#acknowledgementDue = false;
