@@ -1,0 +1,9 @@
+// core must run on any JavaScript runtime, so neither Bun nor Node types are
+// loaded here; its tests have their own project in test/.
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src"]
+}
