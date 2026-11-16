@@ -1,8 +1,19 @@
 export {
+  defineMessages,
   PROTOCOL_VERSION,
   type Address,
   type Clock,
   type CloseReason,
+  type DeliveryMode,
+  type MessageCodec,
+  type MessageDefinition,
+  type MessageType,
   type Transport,
 } from "@ticknet/core";
-export { Client, ConnectError, connect, type ClientOptions } from "./client";
+export {
+  Client,
+  ConnectError,
+  connect,
+  type ClientEvents,
+  type ClientOptions,
+} from "./client";

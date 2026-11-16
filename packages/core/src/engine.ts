@@ -5,6 +5,10 @@ import type { Address, OutgoingDatagram, Transport } from "./transport";
  * A protocol engine, one per role. It performs no I/O and never reads the
  * time: received Datagrams and the current time are handed to it, and it
  * queues Datagrams to send and events for the caller to collect.
+ *
+ * The caller handles every event of one `pollEvents` call before calling
+ * `pollDatagrams` again, so that an engine can hold Datagrams back until the
+ * game has reacted to an event (the Server ends a Tick that way).
  */
 export interface Engine<Event> {
   receive(data: Uint8Array, from: Address, now: number): void;

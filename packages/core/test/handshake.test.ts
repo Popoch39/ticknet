@@ -11,9 +11,10 @@ const SERVER: Address = { host: "10.0.0.1", port: 4000 };
 const CLIENT: Address = { host: "10.0.0.2", port: 50000 };
 const SECRET = Uint8Array.from({ length: 16 }, (_, index) => index * 17);
 
-const newServer = () => new ServerEngine({ secret: SECRET });
+const newServer = (secret = SECRET) =>
+  new ServerEngine({ secret, tickRate: 30 }, 0);
 const newClient = (now = 0) =>
-  new ClientEngine({ server: SERVER, timeout: 5000 }, now);
+  new ClientEngine({ server: SERVER, timeout: 5000, sendRate: 30 }, now);
 
 /** Hands each Datagram the `from` engine queued to the `to` engine, and returns them. */
 function carry(
@@ -83,10 +84,13 @@ test("a connection request that is never echoed opens no Connection and leaves n
   carry(client, server, CLIENT);
   expect(server.pollDatagrams()).toHaveLength(1);
 
+  // The Server ticks either way: it must behave exactly like one that never saw the request.
+  const untouched = newServer();
   server.advance(60_000);
-  expect(server.pollEvents()).toEqual([]);
+  untouched.advance(60_000);
+  expect(server.pollEvents()).toEqual(untouched.pollEvents());
   expect(server.pollDatagrams()).toEqual([]);
-  expect(server.nextDeadline()).toBeUndefined();
+  expect(server.nextDeadline()).toBe(untouched.nextDeadline());
 });
 
 test("the challenge carries all the Server needs: an engine that never saw the request accepts its echo", () => {
@@ -116,9 +120,7 @@ test("a challenge echoed from another address than it was issued to is rejected"
 });
 
 test("a challenge issued under another secret is rejected", () => {
-  const client = clientReadyToEcho(
-    new ServerEngine({ secret: new Uint8Array(16) }),
-  );
+  const client = clientReadyToEcho(newServer(new Uint8Array(16)));
   const server = newServer();
 
   carry(client, server, CLIENT);
