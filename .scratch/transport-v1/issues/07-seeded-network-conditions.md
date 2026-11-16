@@ -10,7 +10,7 @@
 - [x] Two runs with the same seed and the same test produce the same sequence of deliveries; a different seed produces a different one
 - [x] Latency and jitter are measured on the injected Clock, so a test with a slow link still runs instantly
 - [x] Conditions can be set per direction, so a test can make only the Client-to-Server path lossy
-- [ ] The same conditions can be applied as a wrapper around any Transport, and work over real UDP on loopback
+- [x] The same conditions can be applied as a wrapper around any Transport, and work over real UDP on loopback
 - [x] The simulated network, the manual Clock and the wrapper are importable by a game through a public testing entry point of core
 - [x] With duplication enabled, an Unreliable Message is delivered at most once
 - [x] With loss enabled, lost Unreliable Messages are simply absent and the Connection stays open
@@ -35,12 +35,12 @@ core, protocol:
 - `client-engine.ts`: the Client resends the current Handshake Datagram (connect request, then echo) every 100 ms (`HANDSHAKE_RESEND_INTERVAL`) until the next step or its timeout. `nextDeadline()` during the Handshake is the earlier of the resend and the timeout.
 - `challenge.ts`: `Challenger` takes an optional `maxAge` (capped at the 5-second lifetime). The Server passes `floor(timeout) - 1`; see below.
 
-Tests: the testing entry point in `packages/core/test/network-conditions.test.ts` (raw Transports: each condition, replay by seed, validation, per direction, the wrapper); seam 1 in `packages/server/test/network-conditions.test.ts` (Handshake under 50% loss for 20 seeds, duplication, loss, Client-to-Server-only loss, three Clients on a bad link, replay by seed); seam 2 in `packages/core/test/handshake.test.ts` (a resent echo after the Server gave up does not ask again).
+Tests: the testing entry point in `packages/core/test/network-conditions.test.ts` (raw Transports: each condition, replay by seed, validation, per direction, the wrapper); seam 1 in `packages/server/test/network-conditions.test.ts` (Handshake under 50% loss for 20 seeds, duplication, loss, Client-to-Server-only loss, three Clients on a bad link, replay by seed) and `packages/server/test/udp-conditions.test.ts` (the wrapper over real loopback UDP); seam 2 in `packages/core/test/handshake.test.ts` (a resent echo after the Server gave up does not ask again).
 
 ### Decisions and assumptions
 
 - **Seams.** Not confirmed interactively (implementer subagent). Besides seam 1, the testing entry point is tested on its own, as a public interface games use directly.
-- **Real UDP is pending ticket 04.** `transport-v1` has no UDP Transport yet. The wrapper is proven around a simulated-network Transport standing in for any Transport, so that box stays unticked. Once ticket 04 lands, the check is one loopback test: wrap both sockets with `withNetworkConditions` and a real Clock, connect, and exchange.
+- **Real UDP.** Ticket 04 landed on `transport-v1` during this ticket and was merged in. `packages/server/test/udp-conditions.test.ts` wraps a loopback `Bun.udpSocket` the way a game would: core's public `SocketTransport`, `withNetworkConditions` and a real Clock, passed as the Server's `transport`. It checks that latency shows in the measured round trip and that full duplication still delivers each Message once. The test writes its own socket opener and real Clock, because `openUdpTransport` and `realClock` are internal to the server and client packages. Ticket 13's demo will need them too: exporting them, or a hook to wrap the Transport the adapter opens, would turn this into a one-liner. The public API is unchanged here.
 - **The seed defaults to 1**, not to a random value, so a run without a seed still replays. The demo (ticket 13) can pass a random seed and print it.
 - **Duplication is handled per Datagram, not per Message**, because a duplicate is a whole Datagram. The 4-byte sequence was chosen over a 2-byte one so that no wrap-around logic is needed (4.5 years at 30 Datagrams per second).
 - **Handshake resend, 100 ms.** It was needed: without it, the test connecting under 50% loss failed. The echo is resent with the same challenge. If echoes keep getting lost for longer than the challenge stays valid, the Client waits for its own timeout; it does not restart from the connect request.
