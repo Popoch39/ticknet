@@ -6,7 +6,12 @@ import {
   type EndpointConditions,
   type NetworkConditions,
 } from "@ticknet/core/testing";
-import { defineMessages, startServer, type Connection } from "@ticknet/server";
+import {
+  defineMessages,
+  startServer,
+  type Connection,
+  type Server,
+} from "@ticknet/server";
 
 const SERVER = { host: "10.0.0.1", port: 4000 };
 
@@ -88,7 +93,7 @@ const range = (count: number) => Array.from({ length: count }, (_, i) => i);
  */
 async function exchange(
   clock: ManualClock,
-  server: Awaited<ReturnType<typeof startServer>>,
+  server: Server,
   { client, connection }: { client: Client; connection: Connection },
   count: number,
 ) {

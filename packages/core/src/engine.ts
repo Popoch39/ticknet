@@ -32,6 +32,7 @@ export class EngineDriver<Event> {
   readonly #onEvent: (event: Event) => void;
   #wakeAt: number | undefined;
   #cancelWake: (() => void) | undefined;
+  #pumping = false;
 
   constructor(
     engine: Engine<Event>,
@@ -52,14 +53,30 @@ export class EngineDriver<Event> {
     this.#pump();
   }
 
+  /**
+   * Runs `action`, which calls into the engine from outside a received
+   * Datagram or a deadline (an answer that arrived asynchronously, say), then
+   * sends what it queued and hands out its events.
+   */
+  perform(action: () => void): void {
+    action();
+    // From inside an event handler, the pump already running picks the output up.
+    if (!this.#pumping) this.#pump();
+  }
+
   #pump(): void {
-    // Handling an event may queue more output, so drain until both queues are empty.
-    for (;;) {
-      const datagrams = this.#engine.pollDatagrams();
-      if (datagrams.length > 0) this.#transport.send(datagrams);
-      const events = this.#engine.pollEvents();
-      for (const event of events) this.#onEvent(event);
-      if (datagrams.length === 0 && events.length === 0) break;
+    this.#pumping = true;
+    try {
+      // Handling an event may queue more output, so drain until both queues are empty.
+      for (;;) {
+        const datagrams = this.#engine.pollDatagrams();
+        if (datagrams.length > 0) this.#transport.send(datagrams);
+        const events = this.#engine.pollEvents();
+        for (const event of events) this.#onEvent(event);
+        if (datagrams.length === 0 && events.length === 0) break;
+      }
+    } finally {
+      this.#pumping = false;
     }
     this.#scheduleWake();
   }

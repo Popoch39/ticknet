@@ -4,8 +4,9 @@ export {
   type ClientEvent,
 } from "./client-engine";
 export type { Clock } from "./clock";
-export type { CloseReason } from "./close-reason";
+export { MAX_CLOSE_CODE, type CloseReason } from "./close-reason";
 export {
+  MAX_AUTH_TOKEN_SIZE,
   MAX_DATAGRAM_MESSAGE_SIZE,
   MAX_DATAGRAM_SIZE,
   PROTOCOL_VERSION,

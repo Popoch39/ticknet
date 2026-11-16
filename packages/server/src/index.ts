@@ -1,5 +1,6 @@
 export {
   defineMessages,
+  MAX_CLOSE_CODE,
   PROTOCOL_VERSION,
   type Address,
   type Clock,
@@ -13,6 +14,9 @@ export {
   Connection,
   Server,
   startServer,
+  type Authenticate,
+  type AuthenticationDecision,
+  type AuthenticationRequest,
   type ServerEvents,
   type ServerOptions,
 } from "./server";
