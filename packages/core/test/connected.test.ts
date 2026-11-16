@@ -22,7 +22,10 @@ function carry(
 
 /** A Server and a Client with an open Connection between them, at time 0. */
 function connectedPair() {
-  const server = new ServerEngine({ secret: SECRET, tickRate: 30 }, 0);
+  const server = new ServerEngine(
+    { secret: SECRET, tickRate: 30, maxConnections: 64, timeout: 10_000 },
+    0,
+  );
   const client = new ClientEngine(
     { server: SERVER, timeout: 5000, sendRate: 10 },
     0,
@@ -30,6 +33,9 @@ function connectedPair() {
   carry(client, server, CLIENT);
   carry(server, client, SERVER);
   carry(client, server, CLIENT);
+  for (const event of server.pollEvents())
+    if (event.type === "authenticationRequested")
+      server.accept(event.connection);
   carry(server, client, SERVER);
   server.pollEvents();
   client.pollEvents();

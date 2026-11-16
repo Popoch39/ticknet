@@ -26,6 +26,12 @@ export interface ClientOptions {
   readonly timeout?: number;
   /** How many times per second queued Messages are sent; 30 by default. */
   readonly sendRate?: number;
+  /**
+   * Opaque bytes handed to the Server's authentication callback; empty by
+   * default. At most MAX_AUTH_TOKEN_SIZE bytes, so that the Handshake fits in
+   * one Datagram.
+   */
+  readonly authToken?: Uint8Array;
 }
 
 /**
@@ -152,6 +158,7 @@ function handshake(
         server: { host, port: options.port },
         timeout: options.timeout ?? 10_000,
         sendRate: options.sendRate ?? 30,
+        authToken: options.authToken,
       },
       clock.now(),
     );
