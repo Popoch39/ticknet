@@ -1,4 +1,5 @@
 export {
+  MAX_AUTH_TOKEN_SIZE,
   PROTOCOL_VERSION,
   type Address,
   type Clock,

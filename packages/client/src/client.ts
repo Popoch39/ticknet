@@ -14,6 +14,12 @@ export interface ClientOptions {
   readonly clock: Clock;
   /** Milliseconds to wait for the Server before giving up; 10 seconds by default. */
   readonly timeout?: number;
+  /**
+   * Opaque bytes handed to the Server's authentication callback; empty by
+   * default. At most MAX_AUTH_TOKEN_SIZE bytes, so that the Handshake fits in
+   * one Datagram.
+   */
+  readonly authToken?: Uint8Array;
 }
 
 /** Why `connect` failed. */
@@ -40,6 +46,7 @@ export function connect(options: ClientOptions): Promise<Client> {
       {
         server: { host: options.host, port: options.port },
         timeout: options.timeout ?? 10_000,
+        authToken: options.authToken,
       },
       options.clock.now(),
     );

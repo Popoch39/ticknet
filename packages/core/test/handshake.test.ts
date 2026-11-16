@@ -11,7 +11,9 @@ const SERVER: Address = { host: "10.0.0.1", port: 4000 };
 const CLIENT: Address = { host: "10.0.0.2", port: 50000 };
 const SECRET = Uint8Array.from({ length: 16 }, (_, index) => index * 17);
 
-const newServer = () => new ServerEngine({ secret: SECRET });
+const SERVER_CONFIG = { maxConnections: 64, timeout: 10_000 };
+
+const newServer = () => new ServerEngine({ ...SERVER_CONFIG, secret: SECRET });
 const newClient = (now = 0) =>
   new ClientEngine({ server: SERVER, timeout: 5000 }, now);
 
@@ -35,10 +37,18 @@ function clientReadyToEcho(server: ServerEngine, now = 0) {
   return client;
 }
 
+/** Accepts every Client whose authentication `server` requested so far. */
+function acceptAll(server: ServerEngine) {
+  for (const event of server.pollEvents())
+    if (event.type === "authenticationRequested")
+      server.accept(event.connection);
+}
+
 /** A Server that has just accepted a Client, with its acceptance queued. */
 function acceptingServer() {
   const server = newServer();
   carry(clientReadyToEcho(server), server, CLIENT);
+  acceptAll(server);
   return server;
 }
 
@@ -97,6 +107,12 @@ test("the challenge carries all the Server needs: an engine that never saw the r
 
   const sameSecret = newServer();
   carry(client, sameSecret, CLIENT);
+  const [request] = sameSecret.pollEvents();
+  expect(request).toMatchObject({
+    type: "authenticationRequested",
+    address: CLIENT,
+  });
+  if (request) sameSecret.accept(request.connection);
   carry(sameSecret, client, SERVER);
 
   expect(sameSecret.pollEvents()).toMatchObject([
@@ -117,7 +133,7 @@ test("a challenge echoed from another address than it was issued to is rejected"
 
 test("a challenge issued under another secret is rejected", () => {
   const client = clientReadyToEcho(
-    new ServerEngine({ secret: new Uint8Array(16) }),
+    new ServerEngine({ ...SERVER_CONFIG, secret: new Uint8Array(16) }),
   );
   const server = newServer();
 
@@ -137,14 +153,53 @@ test("a challenge echoed long after it was issued is rejected", () => {
   expect(server.pollDatagrams()).toEqual([]);
 });
 
+test("the Server asks for authentication only once the challenge comes back from the address it was issued to", () => {
+  const server = newServer();
+  const client = newClient();
+
+  carry(client, server, CLIENT);
+  expect(server.pollEvents()).toEqual([]);
+  carry(server, client, SERVER);
+  const echo = onlyDatagram(client);
+  server.receive(echo, { host: "10.0.0.66", port: 50000 }, 0);
+  expect(server.pollEvents()).toEqual([]);
+
+  server.receive(echo, CLIENT, 0);
+  expect(server.pollEvents()).toEqual([
+    {
+      type: "authenticationRequested",
+      connection: expect.any(Number),
+      address: CLIENT,
+      authToken: new Uint8Array(0),
+    },
+  ]);
+});
+
 test("a replayed echo opens no second Connection", () => {
   const server = newServer();
-  const echo = clientReadyToEcho(server).pollDatagrams();
-
-  for (const datagram of [...echo, ...echo])
-    server.receive(datagram.data, CLIENT, 0);
-
+  const echo = onlyDatagram(clientReadyToEcho(server));
+  server.receive(echo, CLIENT, 0);
+  acceptAll(server);
   expect(server.pollEvents()).toHaveLength(1);
+  server.pollDatagrams();
+
+  server.receive(echo, CLIENT, 0);
+
+  expect(server.pollEvents()).toEqual([]);
+  // The acceptance may have been lost, so it is sent again.
+  expect(server.pollDatagrams()).toHaveLength(1);
+});
+
+test("an echo replayed while the Client is being authenticated asks for authentication only once", () => {
+  const server = newServer();
+  const echo = onlyDatagram(clientReadyToEcho(server));
+
+  server.receive(echo, CLIENT, 0);
+  server.receive(echo, CLIENT, 0);
+
+  expect(server.pollEvents()).toMatchObject([
+    { type: "authenticationRequested", address: CLIENT },
+  ]);
 });
 
 test("no Datagram sent to an unproven address is larger than the Datagram that triggered it", () => {
@@ -231,7 +286,9 @@ test("every Datagram of a Handshake starts with the protocol version byte and no
     ...carry(client, server, CLIENT),
     ...carry(server, client, SERVER),
   ];
-  sent.push(...carry(client, server, CLIENT), ...carry(server, client, SERVER));
+  sent.push(...carry(client, server, CLIENT));
+  acceptAll(server);
+  sent.push(...carry(server, client, SERVER));
 
   expect(client.pollEvents()).toEqual([{ type: "connectionOpened" }]);
   expect(sent).toHaveLength(4);

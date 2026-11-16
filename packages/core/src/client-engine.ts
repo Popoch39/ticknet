@@ -1,5 +1,9 @@
 import type { CloseReason } from "./close-reason";
-import { decodeDatagram, encodeDatagram } from "./datagram";
+import {
+  decodeDatagram,
+  encodeDatagram,
+  MAX_AUTH_TOKEN_SIZE,
+} from "./datagram";
 import type { Engine } from "./engine";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
@@ -11,6 +15,8 @@ export interface ClientEngineConfig {
   readonly server: Address;
   /** Milliseconds the Handshake may take before the attempt closes with a timeout reason. */
   readonly timeout: number;
+  /** Opaque bytes for the Server's authentication callback; at most MAX_AUTH_TOKEN_SIZE. */
+  readonly authToken?: Uint8Array;
 }
 
 /**
@@ -20,11 +26,20 @@ export interface ClientEngineConfig {
 export class ClientEngine implements Engine<ClientEvent> {
   readonly #server: Address;
   readonly #handshakeDeadline: number;
+  readonly #authToken: Uint8Array;
   #state: "requesting" | "echoing" | "connected" | "closed" = "requesting";
   #datagrams: OutgoingDatagram[] = [];
   #events: ClientEvent[] = [];
 
+  /** Throws a RangeError, before sending anything, if the Auth token cannot fit in the Handshake. */
   constructor(config: ClientEngineConfig, now: number) {
+    const authToken = config.authToken ?? new Uint8Array(0);
+    if (authToken.byteLength > MAX_AUTH_TOKEN_SIZE)
+      throw new RangeError(
+        `The Auth token is ${authToken.byteLength} bytes long, but at most ${MAX_AUTH_TOKEN_SIZE} fit in the Handshake`,
+      );
+    // Copied so that the caller may reuse its buffer before the challenge arrives.
+    this.#authToken = authToken.slice();
     this.#server = config.server;
     this.#handshakeDeadline = now + config.timeout;
     this.#datagrams.push({
@@ -49,6 +64,7 @@ export class ClientEngine implements Engine<ClientEvent> {
           data: encodeDatagram({
             kind: "challengeResponse",
             challenge: datagram.challenge,
+            authToken: this.#authToken,
           }),
         });
         break;
@@ -56,6 +72,9 @@ export class ClientEngine implements Engine<ClientEvent> {
         if (this.#state !== "echoing") break;
         this.#state = "connected";
         this.#events.push({ type: "connectionOpened" });
+        break;
+      case "refused":
+        this.#close(datagram.reason);
         break;
     }
   }

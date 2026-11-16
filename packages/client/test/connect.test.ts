@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { connect, PROTOCOL_VERSION } from "@ticknet/client";
+import {
+  connect,
+  MAX_AUTH_TOKEN_SIZE,
+  PROTOCOL_VERSION,
+} from "@ticknet/client";
 import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
 
 const SERVER = { host: "10.0.0.1", port: 4000 };
@@ -40,6 +44,30 @@ test("a Client that gets no answer fails to connect with a timeout reason after 
   clock.advance(1);
   await settle();
   expect(outcome.failure).toMatchObject({ reason: { kind: "timeout" } });
+});
+
+test("an Auth token too large for the Handshake fails the connect call at once, sending nothing", async () => {
+  const clock = new ManualClock();
+  const network = new SimulatedNetwork({ clock });
+  const received: Uint8Array[] = [];
+  network.bind(SERVER).listen({ datagram: (data) => received.push(data) });
+
+  const outcome = track(
+    connect({
+      ...SERVER,
+      transport: network.bind(CLIENT),
+      clock,
+      authToken: new Uint8Array(MAX_AUTH_TOKEN_SIZE + 1),
+    }),
+  );
+  await settle();
+
+  expect(outcome.failure).toBeInstanceOf(RangeError);
+  expect(String(outcome.failure)).toContain(
+    `at most ${MAX_AUTH_TOKEN_SIZE} fit in the Handshake`,
+  );
+  clock.advance(0);
+  expect(received).toEqual([]);
 });
 
 test("a Client fails to connect with a version mismatch reason to a Server of another protocol version", async () => {
