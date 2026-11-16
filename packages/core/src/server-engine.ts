@@ -10,6 +10,7 @@ import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { assertFitsInDatagram, Outbox } from "./outbox";
 import { ReceivedSequences } from "./received-sequences";
+import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -55,6 +56,7 @@ interface OpenConnection {
   readonly address: Address;
   readonly outbox: Outbox;
   readonly received: ReceivedSequences;
+  readonly sequenced: SequencedOrder;
 }
 
 /**
@@ -114,7 +116,7 @@ export class ServerEngine implements Engine<ServerEvent> {
 
   /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
   broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
-    assertFitsInDatagram(id, body);
+    assertFitsInDatagram(id, body, delivery);
     for (const open of this.#byId.values())
       open.outbox.push(id, body, delivery);
   }
@@ -153,13 +155,14 @@ export class ServerEngine implements Engine<ServerEvent> {
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
         if (!open || !open.received.accept(datagram.sequence)) break;
-        for (const { id, body } of datagram.messages)
-          this.#events.push({
-            type: "message",
-            connection: open.id,
-            id,
-            body,
-          });
+        for (const message of datagram.messages)
+          if (open.sequenced.admit(message))
+            this.#events.push({
+              type: "message",
+              connection: open.id,
+              id: message.id,
+              body: message.body,
+            });
         break;
       }
     }
@@ -178,6 +181,7 @@ export class ServerEngine implements Engine<ServerEvent> {
       address,
       outbox: new Outbox(),
       received: new ReceivedSequences(),
+      sequenced: new SequencedOrder(),
     };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);

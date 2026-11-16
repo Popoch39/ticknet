@@ -9,6 +9,7 @@ import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import { Outbox } from "./outbox";
 import { ReceivedSequences } from "./received-sequences";
+import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 export type ClientEvent =
@@ -52,6 +53,7 @@ export class ClientEngine implements Engine<ClientEvent> {
   #handshakeResendAt: number;
   readonly #outbox = new Outbox();
   readonly #received = new ReceivedSequences();
+  readonly #sequenced = new SequencedOrder();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
   #lastServerTick: number | undefined;
@@ -127,8 +129,13 @@ export class ClientEngine implements Engine<ClientEvent> {
           datagram.tick > this.#lastServerTick
         )
           this.#lastServerTick = datagram.tick;
-        for (const { id, body } of datagram.messages)
-          this.#events.push({ type: "message", id, body });
+        for (const message of datagram.messages)
+          if (this.#sequenced.admit(message))
+            this.#events.push({
+              type: "message",
+              id: message.id,
+              body: message.body,
+            });
         break;
     }
   }
