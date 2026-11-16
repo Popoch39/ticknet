@@ -60,6 +60,15 @@ export class Challenger {
   }
 }
 
+/**
+ * Whether two challenges are the same one. A Server issues an address a
+ * different challenge every millisecond, so a different one from an address
+ * means a new attempt to connect rather than a repeated echo.
+ */
+export function sameChallenge(a: Uint8Array, b: Uint8Array): boolean {
+  return equalInConstantTime(a, b);
+}
+
 function millisecondsMod32(now: number): number {
   return Math.floor(now) >>> 0;
 }

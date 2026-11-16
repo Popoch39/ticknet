@@ -15,12 +15,32 @@ export function assertFitsInDatagram(id: number, body: Uint8Array): void {
 }
 
 /**
+ * How long an endpoint with nothing to send on a Connection waits before
+ * sending a keepalive, given its own `timeout`: four fit in it, and never
+ * more than a second passes, so that a peer with a shorter timeout still
+ * hears from it in time.
+ */
+export function keepaliveInterval(timeout: number): number {
+  return Math.min(1000, timeout / 4);
+}
+
+/**
  * The Messages one endpoint has sent on a Connection and not yet put on the
  * network. They leave together, in as few Datagrams as possible, when the
- * outbox is flushed.
+ * outbox is flushed. When nothing has left for `keepaliveInterval`
+ * milliseconds, a flush puts an empty Datagram on the network all the same,
+ * so that the other side does not time out.
  */
 export class Outbox {
+  readonly #keepaliveInterval: number;
+  #lastSent: number;
   #messages: MessageEntry[] = [];
+
+  /** `now` counts as the last time something was sent. */
+  constructor(keepaliveInterval: number, now: number) {
+    this.#keepaliveInterval = keepaliveInterval;
+    this.#lastSent = now;
+  }
 
   /** Throws a RangeError, before queuing anything, for a body that cannot fit in one Datagram. */
   push(id: number, body: Uint8Array, delivery: DeliveryMode): void {
@@ -28,10 +48,16 @@ export class Outbox {
     this.#messages.push({ delivery, id, body });
   }
 
-  /** Empties the outbox into connected Datagrams stamped with the sender's `tick`. */
-  flush(tick: number): Uint8Array[] {
+  /**
+   * Empties the outbox, at time `now`, into connected Datagrams stamped with
+   * the sender's `tick`; into a single empty one if a keepalive is due.
+   */
+  flush(tick: number, now: number): Uint8Array[] {
     const groups = packMessages(this.#messages);
     this.#messages = [];
+    if (groups.length === 0 && now - this.#lastSent >= this.#keepaliveInterval)
+      groups.push([]);
+    if (groups.length > 0) this.#lastSent = now;
     return groups.map((messages) =>
       encodeDatagram({ kind: "connected", tick, messages }),
     );

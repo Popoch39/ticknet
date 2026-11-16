@@ -4,6 +4,7 @@ import {
   ServerEngine,
   type Address,
   type Clock,
+  type CloseReason,
   type ConnectionId,
   type DeliveryMode,
   type MessageType,
@@ -52,9 +53,10 @@ export interface ServerOptions {
    */
   readonly maxConnections?: number;
   /**
-   * Milliseconds the Server waits on a Client; 10 seconds by default. For
-   * now it bounds the wait for the authentication callback: a later answer
-   * is ignored and the Client's place is freed.
+   * Milliseconds the Server waits on a Client; 10 seconds by default. A
+   * Connection on which nothing arrives for that long closes with a timeout
+   * reason, and an authentication callback that has not answered by then is
+   * ignored, freeing the Client's place.
    */
   readonly timeout?: number;
 }
@@ -62,7 +64,7 @@ export interface ServerOptions {
 /** What a Connection needs from its Server. */
 interface ConnectionLink {
   send(id: number, body: Uint8Array, delivery: DeliveryMode): void;
-  close(): void;
+  close(code: number): void;
 }
 
 /** One Client's Connection to this Server. */
@@ -81,20 +83,32 @@ export class Connection<Data = undefined> {
 
   /**
    * Sends a Message to this Client when the current Tick ends. Throws at once
-   * if the Message cannot fit in one Datagram.
+   * if the Message cannot fit in one Datagram, or if the Connection has
+   * closed.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#link.send(type.id, type.encode(value), delivery);
   }
 
-  /** Ends this Connection, freeing its place on the Server. The Client is not told yet. */
-  close(): void {
-    this.#link.close();
+  /**
+   * Ends this Connection, freeing its place on the Server, and tells the
+   * Client it was closed by the Server with `code`, an integer from 0 to
+   * MAX_CLOSE_CODE (0 by default). Messages not sent yet are dropped. Does
+   * nothing if the Connection has already closed.
+   */
+  close(code = 0): void {
+    this.#link.close(code);
   }
 }
 
 export interface ServerEvents<Data = undefined> {
   connectionOpened: (connection: Connection<Data>) => void;
+  /**
+   * Runs once for every Connection that opened, whichever side ended it:
+   * the Client left, the Server closed it or stopped, or it timed out. No
+   * Message from it is delivered afterwards.
+   */
+  connectionClosed: (connection: Connection<Data>, reason: CloseReason) => void;
   /** Runs once per Tick, before everything sent during the Tick leaves. */
   tick: (tick: number) => void;
   /**
@@ -115,12 +129,14 @@ export class Server<Data = undefined> {
     [E in keyof ServerEvents<Data>]: Set<ServerEvents<Data>[E]>;
   } = {
     connectionOpened: new Set(),
+    connectionClosed: new Set(),
     tick: new Set(),
     error: new Set(),
   };
   /** The UDP port the Server listens on; undefined with an injected Transport. */
   readonly port: number | undefined;
   readonly #engine: ServerEngine;
+  readonly #clock: Clock;
   readonly #driver: EngineDriver<ServerEvent>;
   readonly #authenticate: (
     request: AuthenticationRequest,
@@ -142,6 +158,7 @@ export class Server<Data = undefined> {
     port?: number,
   ) {
     this.port = port;
+    this.#clock = clock;
     this.#authenticate = authenticate;
     this.#engine = new ServerEngine(
       {
@@ -165,6 +182,14 @@ export class Server<Data = undefined> {
           if (!connection) break;
           for (const listener of this.#listeners.connectionOpened)
             listener(connection);
+          break;
+        }
+        case "connectionClosed": {
+          const connection = this.#connections.get(event.connection);
+          if (!connection) break;
+          this.#connections.delete(event.connection);
+          for (const listener of this.#listeners.connectionClosed)
+            listener(connection, event.reason);
           break;
         }
         case "tick":
@@ -203,10 +228,15 @@ export class Server<Data = undefined> {
   }
 
   /**
-   * Stops ticking and releases the socket and timers, so that the process
-   * can exit and the port can be reused. Clients are not told yet.
+   * Closes every Connection, telling each Client it was closed by the Server
+   * (with code 0), then stops ticking and releases the socket and timers, so
+   * that the process can exit and the port can be reused.
    */
   stop(): void {
+    this.#driver.perform(() => {
+      for (const connection of this.#connections.keys())
+        this.#engine.close(connection, 0);
+    });
     this.#driver.stop();
   }
 
@@ -243,16 +273,14 @@ export class Server<Data = undefined> {
   ): void {
     if (decision.accept) {
       // The engine's opened event is handed out after this returns, so registering afterwards is in time.
-      if (this.#engine.accept(connection))
+      if (this.#engine.accept(connection, this.#clock.now()))
         this.#connections.set(
           connection,
           new Connection(address, decision.data, {
             send: (id, body, delivery) =>
               this.#engine.send(connection, id, body, delivery),
-            close: () => {
-              this.#connections.delete(connection);
-              this.#driver.perform(() => this.#engine.close(connection));
-            },
+            close: (code) =>
+              this.#driver.perform(() => this.#engine.close(connection, code)),
           }),
         );
       return;

@@ -43,7 +43,7 @@ function clientReadyToEcho(server: ServerEngine, now = 0) {
 function acceptAll(server: ServerEngine) {
   for (const event of server.pollEvents())
     if (event.type === "authenticationRequested")
-      server.accept(event.connection);
+      server.accept(event.connection, 0);
 }
 
 /** A Server that has just accepted a Client, with its acceptance queued. */
@@ -118,7 +118,7 @@ test("the challenge carries all the Server needs: an engine that never saw the r
     address: CLIENT,
   });
   if (request?.type === "authenticationRequested")
-    sameSecret.accept(request.connection);
+    sameSecret.accept(request.connection, 0);
   carry(sameSecret, client, SERVER);
 
   expect(sameSecret.pollEvents()).toMatchObject([

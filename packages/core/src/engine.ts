@@ -62,13 +62,15 @@ export class EngineDriver<Event> {
   perform(action: () => void): void {
     action();
     // From inside an event handler, the pump already running picks the output up.
-    if (!this.#pumping) this.#pump();
+    if (!this.#pumping && !this.#stopped) this.#pump();
   }
 
   /**
-   * Closes the Transport and stops waking the engine, which then sends,
-   * receives and raises nothing more. Releasing the Transport and the Clock
-   * this way lets the process exit.
+   * Stops waking the engine and closes the Transport, after sending and
+   * handing out what the engine has already queued (close notices, say);
+   * from inside an event handler, once the pump running is done. The engine
+   * then receives and sends nothing more. Releasing the Transport and the
+   * Clock this way lets the process exit.
    */
   stop(): void {
     if (this.#stopped) return;
@@ -76,15 +78,14 @@ export class EngineDriver<Event> {
     this.#cancelWake?.();
     this.#cancelWake = undefined;
     this.#wakeAt = undefined;
-    this.#transport.close();
+    if (!this.#pumping) this.#transport.close();
   }
 
   #pump(): void {
     this.#pumping = true;
     try {
-      // Handling an event may queue more output, so drain until both queues
-      // are empty; an event handler may also stop the driver.
-      while (!this.#stopped) {
+      // Handling an event may queue more output, so drain until both queues are empty.
+      for (;;) {
         const datagrams = this.#engine.pollDatagrams();
         if (datagrams.length > 0) this.#transport.send(datagrams);
         const events = this.#engine.pollEvents();
@@ -94,7 +95,9 @@ export class EngineDriver<Event> {
     } finally {
       this.#pumping = false;
     }
-    this.#scheduleWake();
+    // An event handler may have stopped the driver.
+    if (this.#stopped) this.#transport.close();
+    else this.#scheduleWake();
   }
 
   #scheduleWake(): void {

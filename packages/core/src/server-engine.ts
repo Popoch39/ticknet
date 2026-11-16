@@ -1,6 +1,6 @@
 import { Cadence } from "./cadence";
-import { Challenger } from "./challenge";
-import { MAX_CLOSE_CODE } from "./close-reason";
+import { Challenger, sameChallenge } from "./challenge";
+import { assertCloseCode, type CloseReason } from "./close-reason";
 import {
   CLIENT_HANDSHAKE_SIZE,
   decodeDatagram,
@@ -8,7 +8,7 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { assertFitsInDatagram, Outbox } from "./outbox";
+import { assertFitsInDatagram, keepaliveInterval, Outbox } from "./outbox";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -27,6 +27,12 @@ export type ServerEvent =
       readonly connection: ConnectionId;
       readonly address: Address;
     }
+  | {
+      /** Raised once per opened Connection, whichever side ended it. */
+      readonly type: "connectionClosed";
+      readonly connection: ConnectionId;
+      readonly reason: CloseReason;
+    }
   | { readonly type: "tick"; readonly tick: number }
   | {
       readonly type: "message";
@@ -43,8 +49,10 @@ export interface ServerEngineConfig {
   /** Clients being authenticated count towards it, so that the Server never accepts more. */
   readonly maxConnections: number;
   /**
-   * Milliseconds the Server waits for an authentication decision; after
-   * that, a late decision is ignored and the Client's place is freed.
+   * Milliseconds the Server waits on a Client: for an authentication
+   * decision, after which a late one is ignored and the Client's place is
+   * freed, and for anything to arrive on an open Connection, after which it
+   * closes with a timeout reason.
    */
   readonly timeout: number;
 }
@@ -52,6 +60,8 @@ export interface ServerEngineConfig {
 interface OpenConnection {
   readonly id: ConnectionId;
   readonly address: Address;
+  /** The challenge whose echo opened it, which tells a repeated echo from a new attempt. */
+  readonly challenge: Uint8Array;
   readonly outbox: Outbox;
 }
 
@@ -74,13 +84,25 @@ export class ServerEngine implements Engine<ServerEvent> {
   /** Proven addresses waiting for the authentication decision, in the order they were asked about. */
   readonly #authenticating = new Map<
     ConnectionId,
-    { readonly address: Address; readonly deadline: number }
+    {
+      readonly address: Address;
+      readonly challenge: Uint8Array;
+      readonly deadline: number;
+    }
   >();
   readonly #authenticatingAddresses = new Set<string>();
   readonly #byAddress = new Map<string, OpenConnection>();
   readonly #byId = new Map<ConnectionId, OpenConnection>();
+  /**
+   * When each open Connection times out unless something arrives from it.
+   * Every Connection waits as long, so re-inserting on arrival keeps the
+   * map ordered by deadline.
+   */
+  readonly #silenceDeadlines = new Map<ConnectionId, number>();
   #nextConnectionId: ConnectionId = 1;
   #tick = 0;
+  /** The time the current Tick started at, which its flush counts as the time of sending. */
+  #tickStartedAt = 0;
   #tickState: "between" | "started" | "ending" = "between";
   #datagrams: OutgoingDatagram[] = [];
   #events: ServerEvent[] = [];
@@ -100,7 +122,11 @@ export class ServerEngine implements Engine<ServerEvent> {
     delivery: DeliveryMode,
   ): void {
     const open = this.#byId.get(connection);
-    if (!open) throw new Error(`There is no open Connection ${connection}`);
+    // Ids are never reused, so one that is not open has closed.
+    if (!open)
+      throw new Error(
+        `Connection ${connection} is closed; nothing more can be sent on it`,
+      );
     open.outbox.push(id, body, delivery);
   }
 
@@ -140,11 +166,12 @@ export class ServerEngine implements Engine<ServerEvent> {
         break;
       case "challengeResponse":
         if (this.#challenger.verify(datagram.challenge, from, now))
-          this.#authenticate(from, datagram.authToken, now);
+          this.#authenticate(from, datagram.challenge, datagram.authToken, now);
         break;
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
         if (!open) break;
+        this.#heardFrom(open.id, now);
         for (const { id, body } of datagram.messages)
           this.#events.push({
             type: "message",
@@ -154,34 +181,52 @@ export class ServerEngine implements Engine<ServerEvent> {
           });
         break;
       }
+      case "close": {
+        const open = this.#byAddress.get(addressKey(from));
+        // A Server never takes a Client's word that the Server closed.
+        if (open && datagram.reason.kind === "closedByClient")
+          this.#forget(open, datagram.reason);
+        break;
+      }
     }
   }
 
   /**
-   * Opens the Connection whose authentication was requested. Returns false,
-   * doing nothing, if it is no longer pending.
+   * Opens the Connection whose authentication was requested, at time `now`.
+   * Returns false, doing nothing, if it is no longer pending.
    */
-  accept(connection: ConnectionId): boolean {
-    const address = this.#authenticating.get(connection)?.address;
-    if (!address) return false;
+  accept(connection: ConnectionId, now: number): boolean {
+    const pending = this.#authenticating.get(connection);
+    if (!pending) return false;
+    const { address, challenge } = pending;
     this.#forgetAuthentication(connection, address);
-    const open = { id: connection, address, outbox: new Outbox() };
+    const open = {
+      id: connection,
+      address,
+      challenge,
+      outbox: new Outbox(keepaliveInterval(this.#timeout), now),
+    };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);
+    this.#heardFrom(connection, now);
     this.#events.push({ type: "connectionOpened", connection, address });
     this.#send(address, encodeDatagram({ kind: "accepted" }));
     return true;
   }
 
   /**
-   * Forgets an open Connection, freeing its place; does nothing if it is not
-   * open. The Client is not told yet.
+   * Closes an open Connection, telling the Client `code` and freeing its
+   * place; what is still queued for it is dropped. Does nothing if it is not
+   * open. Throws a RangeError if `code` is not an integer from 0 to
+   * MAX_CLOSE_CODE.
    */
-  close(connection: ConnectionId): void {
+  close(connection: ConnectionId, code: number): void {
+    assertCloseCode(code, "close");
     const open = this.#byId.get(connection);
     if (!open) return;
-    this.#byId.delete(connection);
-    this.#byAddress.delete(addressKey(open.address));
+    const reason = { kind: "closedByServer", code } as const;
+    this.#send(open.address, encodeDatagram({ kind: "close", reason }));
+    this.#forget(open, reason);
   }
 
   /**
@@ -190,10 +235,7 @@ export class ServerEngine implements Engine<ServerEvent> {
    * not an integer from 0 to MAX_CLOSE_CODE.
    */
   deny(connection: ConnectionId, code: number): void {
-    if (!Number.isInteger(code) || code < 0 || code > MAX_CLOSE_CODE)
-      throw new RangeError(
-        `A denial code must be an integer from 0 to ${MAX_CLOSE_CODE}, not ${code}`,
-      );
+    assertCloseCode(code, "denial");
     const address = this.#authenticating.get(connection)?.address;
     if (!address) return;
     this.#forgetAuthentication(connection, address);
@@ -209,27 +251,37 @@ export class ServerEngine implements Engine<ServerEvent> {
       // The Client has given up by now, or soon will: it times out on its own.
       this.#forgetAuthentication(connection, address);
     }
+    for (const [connection, deadline] of this.#silenceDeadlines) {
+      if (deadline > now) break;
+      const open = this.#byId.get(connection);
+      if (open) this.#forget(open, { kind: "timeout" });
+    }
     // One Tick per call, so that each one is handled and flushed before the next starts.
     if (this.#tickState === "between" && now >= this.#ticks.next) {
       this.#ticks.step();
       this.#tick++;
+      this.#tickStartedAt = now;
       this.#tickState = "started";
       this.#events.push({ type: "tick", tick: this.#tick });
     }
   }
 
-  nextDeadline(): number | undefined {
-    // Every authentication waits as long, so the oldest one ends first.
-    for (const { deadline } of this.#authenticating.values())
-      return Math.min(deadline, this.#ticks.next);
-    return this.#ticks.next;
+  nextDeadline(): number {
+    // In both maps, the first entry ends first.
+    const [authentication] = this.#authenticating.values();
+    const [silence] = this.#silenceDeadlines.values();
+    return Math.min(
+      this.#ticks.next,
+      authentication?.deadline ?? Infinity,
+      silence ?? Infinity,
+    );
   }
 
   pollDatagrams(): OutgoingDatagram[] {
     if (this.#tickState === "ending") {
       this.#tickState = "between";
       for (const open of this.#byId.values())
-        for (const data of open.outbox.flush(this.#tick))
+        for (const data of open.outbox.flush(this.#tick, this.#tickStartedAt))
           this.#datagrams.push({ to: open.address, data });
     }
     const datagrams = this.#datagrams;
@@ -244,17 +296,43 @@ export class ServerEngine implements Engine<ServerEvent> {
     return events;
   }
 
+  #heardFrom(connection: ConnectionId, now: number): void {
+    this.#silenceDeadlines.delete(connection);
+    this.#silenceDeadlines.set(connection, now + this.#timeout);
+  }
+
+  #forget(open: OpenConnection, reason: CloseReason): void {
+    this.#byId.delete(open.id);
+    this.#byAddress.delete(addressKey(open.address));
+    this.#silenceDeadlines.delete(open.id);
+    this.#events.push({
+      type: "connectionClosed",
+      connection: open.id,
+      reason,
+    });
+  }
+
   #forgetAuthentication(connection: ConnectionId, address: Address): void {
     this.#authenticating.delete(connection);
     this.#authenticatingAddresses.delete(addressKey(address));
   }
 
-  #authenticate(from: Address, authToken: Uint8Array, now: number): void {
+  #authenticate(
+    from: Address,
+    challenge: Uint8Array,
+    authToken: Uint8Array,
+    now: number,
+  ): void {
     const key = addressKey(from);
-    // A repeated echo means the acceptance was lost: answer again, without a second Connection.
-    if (this.#byAddress.has(key)) {
-      this.#send(from, encodeDatagram({ kind: "accepted" }));
-      return;
+    const open = this.#byAddress.get(key);
+    if (open) {
+      // A repeated echo means the acceptance was lost: answer again, without a second Connection.
+      if (sameChallenge(challenge, open.challenge)) {
+        this.#send(from, encodeDatagram({ kind: "accepted" }));
+        return;
+      }
+      // The Client started over, so it left the old Connection, whose close notice was lost.
+      this.#forget(open, { kind: "closedByClient" });
     }
     // While the decision is pending, the game has already been asked.
     if (this.#authenticatingAddresses.has(key)) return;
@@ -271,6 +349,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     const connection = this.#nextConnectionId++;
     this.#authenticating.set(connection, {
       address: from,
+      challenge,
       deadline: now + this.#timeout,
     });
     this.#authenticatingAddresses.add(key);

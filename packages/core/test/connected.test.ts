@@ -35,7 +35,7 @@ function connectedPair() {
   carry(client, server, CLIENT);
   for (const event of server.pollEvents())
     if (event.type === "authenticationRequested")
-      server.accept(event.connection);
+      server.accept(event.connection, 0);
   carry(server, client, SERVER);
   server.pollEvents();
   client.pollEvents();

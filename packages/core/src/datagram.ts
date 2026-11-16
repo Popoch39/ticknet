@@ -38,11 +38,13 @@ const KIND_CHALLENGE_RESPONSE = 3;
 const KIND_ACCEPTED = 4;
 const KIND_REFUSED = 5;
 const KIND_CONNECTED = 6;
+const KIND_CLOSE = 7;
 
 /**
  * A connected Datagram, sent either way on an open Connection: after the
  * common header, the sender's Tick number (32 bits), then Message entries up
- * to the end. Acknowledgement data is meant to join this header.
+ * to the end. Acknowledgement data is meant to join this header. One with no
+ * entry at all is a keepalive.
  */
 const CONNECTED_HEADER_SIZE = HEADER_SIZE + 4;
 
@@ -72,6 +74,19 @@ const REFUSED_SERVER_FULL = 3;
 const REFUSED_SIZE = HEADER_SIZE + 1;
 const REFUSED_DENIED_SIZE = REFUSED_SIZE + 2;
 
+/** The reasons one side of an open Connection can tell the other it closed it for. */
+type CloseNoticeReason = Extract<
+  CloseReason,
+  { kind: "closedByClient" | "closedByServer" }
+>;
+
+const CLOSED_BY_CLIENT = 1;
+const CLOSED_BY_SERVER = 2;
+
+/** A close notice is its reason byte, followed by the game's 16-bit code when the Server closed. */
+const CLOSED_BY_CLIENT_SIZE = HEADER_SIZE + 1;
+const CLOSED_BY_SERVER_SIZE = CLOSED_BY_CLIENT_SIZE + 2;
+
 export interface MessageEntry {
   readonly delivery: DeliveryMode;
   readonly id: number;
@@ -92,7 +107,9 @@ export type Datagram =
       readonly kind: "connected";
       readonly tick: number;
       readonly messages: readonly MessageEntry[];
-    };
+    }
+  /** Tells the other side of an open Connection that it is over. */
+  | { readonly kind: "close"; readonly reason: CloseNoticeReason };
 
 /** A Datagram from an endpoint of another protocol version, whose format is unknown. */
 export type OtherVersion = { readonly kind: "otherVersion" };
@@ -123,7 +140,38 @@ export function encodeDatagram(datagram: Datagram): Uint8Array {
       return encodeRefused(datagram.reason);
     case "connected":
       return encodeConnected(datagram.tick, datagram.messages);
+    case "close":
+      return datagram.reason.kind === "closedByClient"
+        ? withHeader(
+            KIND_CLOSE,
+            CLOSED_BY_CLIENT_SIZE,
+            Uint8Array.of(CLOSED_BY_CLIENT),
+          )
+        : withHeader(
+            KIND_CLOSE,
+            CLOSED_BY_SERVER_SIZE,
+            Uint8Array.of(
+              CLOSED_BY_SERVER,
+              datagram.reason.code >>> 8,
+              datagram.reason.code & 0xff,
+            ),
+          );
   }
+}
+
+function decodeClose(data: Uint8Array): Datagram | undefined {
+  const reason = data[HEADER_SIZE];
+  if (data.byteLength === CLOSED_BY_CLIENT_SIZE && reason === CLOSED_BY_CLIENT)
+    return { kind: "close", reason: { kind: "closedByClient" } };
+  if (
+    data.byteLength === CLOSED_BY_SERVER_SIZE &&
+    reason === CLOSED_BY_SERVER
+  ) {
+    const code =
+      ((data[HEADER_SIZE + 1] ?? 0) << 8) | (data[HEADER_SIZE + 2] ?? 0);
+    return { kind: "close", reason: { kind: "closedByServer", code } };
+  }
+  return undefined;
 }
 
 function encodeRefused(reason: RefusalReason): Uint8Array {
@@ -263,6 +311,8 @@ export function decodeDatagram(
       return decodeRefused(data);
     case KIND_CONNECTED:
       return decodeConnected(data);
+    case KIND_CLOSE:
+      return decodeClose(data);
   }
   return undefined;
 }
