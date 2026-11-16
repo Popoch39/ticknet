@@ -93,3 +93,27 @@ test("a Client fails to connect with a version mismatch reason to a Server of an
     reason: { kind: "versionMismatch" },
   });
 });
+
+// A simulated Transport frees its address once closed, as a socket frees its port.
+test("a connect that fails releases its Transport, whether it timed out or was refused at once", async () => {
+  const clock = new ManualClock();
+  const network = new SimulatedNetwork({ clock });
+  const timedOut = track(
+    connect({ ...SERVER, transport: network.bind(CLIENT), clock }),
+  );
+  clock.advance(10_000);
+  await settle();
+  const tooLarge = track(
+    connect({
+      ...SERVER,
+      transport: network.bind(CLIENT),
+      clock,
+      authToken: new Uint8Array(MAX_AUTH_TOKEN_SIZE + 1),
+    }),
+  );
+  await settle();
+
+  expect(timedOut.failure).toMatchObject({ reason: { kind: "timeout" } });
+  expect(tooLarge.failure).toBeInstanceOf(RangeError);
+  expect(() => network.bind(CLIENT)).not.toThrow();
+});

@@ -153,15 +153,22 @@ function handshake(
   clock: Clock,
 ): Promise<Client> {
   return new Promise((resolve, reject) => {
-    const engine = new ClientEngine(
-      {
-        server: { host, port: options.port },
-        timeout: options.timeout ?? 10_000,
-        sendRate: options.sendRate ?? 30,
-        authToken: options.authToken,
-      },
-      clock.now(),
-    );
+    let engine: ClientEngine;
+    try {
+      engine = new ClientEngine(
+        {
+          server: { host, port: options.port },
+          timeout: options.timeout ?? 10_000,
+          sendRate: options.sendRate ?? 30,
+          authToken: options.authToken,
+        },
+        clock.now(),
+      );
+    } catch (error) {
+      // Invalid options: the socket is already open and must not keep the process alive.
+      transport.close();
+      throw error;
+    }
     const listeners: Listeners = { error: new Set() };
     const router = new MessageRouter<void>((error) => {
       if (listeners.error.size === 0) console.error(error);
