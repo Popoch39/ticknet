@@ -26,6 +26,9 @@
       "dependencies": {
         "@ticknet/core": "workspace:*",
       },
+      "devDependencies": {
+        "@ticknet/client": "workspace:*",
+      },
     },
   },
   "packages": {
