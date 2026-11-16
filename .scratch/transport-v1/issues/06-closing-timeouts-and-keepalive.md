@@ -50,7 +50,8 @@ Tests: seam 1 in `packages/server/test/closing.test.ts` (its `cuttable` Transpor
 
 ### Notes for later tickets
 
-- Ticket 07: under loss, a single lost `accepted` already worked (the Server answers a repeated echo); keep resending the _same_ echo, since a different challenge from an open address now replaces the Connection. A Client in `echoing` accepts a `closedByServer` notice.
+- **Merge with tickets 07 and 08.** Ticket 07's Handshake resend repeats the _same_ echo, which the challenge comparison above relies on: a different challenge from an open address replaces the Connection. Only connected Datagrams that `ReceivedSequences` accepts (not copies, not ones 1024 or more behind) push a silence deadline back. The keepalive is an ordinary connected Datagram, so it takes the next Datagram sequence number. Ticket 07's note about remembering recent refusals was not taken up.
+- A Client in `echoing` accepts a `closedByServer` notice.
 - Ticket 09: keepalives are empty connected Datagrams, so acks put in that header are carried by them; `keepaliveInterval` is the knob if round-trip time needs fresher samples.
 - Ticket 10: the backlog-overflow reason joins `CloseReason`; closing with it should go through the same `#forget` path (one event per Connection). A close drops queued Messages, Reliable ones included.
 - A Message handler that closes its Connection still sees the remaining Messages of the same Datagram, which were received before the close; nothing arrives after the closed event.
