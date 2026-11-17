@@ -1,6 +1,7 @@
 export {
   defineMessages,
   MAX_CLOSE_CODE,
+  MAX_RELIABLE_BACKLOG,
   PROTOCOL_VERSION,
   type Address,
   type Clock,

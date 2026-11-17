@@ -23,14 +23,28 @@ function carry(
     to.receive(datagram.data, origin, 0);
 }
 
-/** A Server and a Client with an open Connection between them, at time 0. */
-function connectedPair() {
+/**
+ * A Server and a Client with an open Connection between them, at time 0.
+ * `timeout`, when given, is the timeout of both sides.
+ */
+function connectedPair(
+  options: { tickRate?: number; sendRate?: number; timeout?: number } = {},
+) {
   const server = new ServerEngine(
-    { secret: SECRET, tickRate: 30, maxConnections: 64, timeout: 10_000 },
+    {
+      secret: SECRET,
+      tickRate: options.tickRate ?? 30,
+      maxConnections: 64,
+      timeout: options.timeout ?? 10_000,
+    },
     0,
   );
   const client = new ClientEngine(
-    { server: SERVER, timeout: 5000, sendRate: 10 },
+    {
+      server: SERVER,
+      timeout: options.timeout ?? 5000,
+      sendRate: options.sendRate ?? 10,
+    },
     0,
   );
   carry(client, server, CLIENT);
@@ -189,6 +203,85 @@ test("each Datagram the Server sends, on its own, acknowledges the Client's rece
     client.receive(answer.data, SERVER, 150);
 
     expect(client.health).toEqual({ roundTripTime: 50, lossRate: 1 / 3 });
+  }
+});
+
+/**
+ * A Server and a Client both running at 100 Hz, joined by a link on which
+ * every Datagram takes `latency` milliseconds, with time moved by hand one
+ * millisecond at a time. The test can make the link lose what the Client
+ * sends, and sees when the Client put a Datagram on the network and which
+ * Messages the Server delivered, and when.
+ */
+function linkedPair(latency: number) {
+  const { server, client, connection } = connectedPair({
+    tickRate: 100,
+    sendRate: 100,
+    timeout: 60_000,
+  });
+  let now = 0;
+  let inFlight: { at: number; data: Uint8Array; toServer: boolean }[] = [];
+  const link = { losesClientDatagrams: false };
+  const clientSentAt: number[] = [];
+  const atServer: { id: number; body: Uint8Array; at: number }[] = [];
+  const run = (duration: number) => {
+    for (const end = now + duration; now < end;) {
+      now++;
+      const arriving = inFlight.filter(({ at }) => at <= now);
+      inFlight = inFlight.filter(({ at }) => at > now);
+      for (const { data, toServer } of arriving)
+        if (toServer) server.receive(data, CLIENT, now);
+        else client.receive(data, SERVER, now);
+      server.advance(now);
+      client.advance(now);
+      for (const event of server.pollEvents())
+        if (event.type === "message")
+          atServer.push({ id: event.id, body: event.body, at: now });
+      for (const { data } of server.pollDatagrams())
+        inFlight.push({ at: now + latency, data, toServer: false });
+      client.pollEvents();
+      for (const { data } of client.pollDatagrams()) {
+        clientSentAt.push(now);
+        if (!link.losesClientDatagrams)
+          inFlight.push({ at: now + latency, data, toServer: true });
+      }
+    }
+  };
+  return { server, client, connection, link, run, clientSentAt, atServer };
+}
+
+test("an unacknowledged Reliable Message is resent after a delay that follows the measured round-trip time, not on every Tick, and no longer once acknowledged", () => {
+  for (const latency of [20, 100]) {
+    const pair = linkedPair(latency);
+    const { server, client, connection, link, run } = pair;
+    // Both sides exchange Messages long enough to measure the round-trip time, then go quiet.
+    for (let elapsed = 0; elapsed < 2000; elapsed += 10) {
+      client.send(1, Uint8Array.of(1), "unreliable");
+      server.send(connection, 1, Uint8Array.of(1), "unreliable");
+      run(10);
+    }
+    run(500);
+    const deliveredBefore = pair.atServer.length;
+
+    // Only the first Datagram carrying it is lost.
+    client.send(2, Uint8Array.of(42), "reliable");
+    link.losesClientDatagrams = true;
+    const sentBefore = pair.clientSentAt.length;
+    while (pair.clientSentAt.length === sentBefore) run(1);
+    link.losesClientDatagrams = false;
+    const sentAt = pair.clientSentAt.at(-1) ?? Number.NaN;
+    run(2000);
+
+    const [resentAt = Number.NaN, ...later] = pair.clientSentAt.filter(
+      (at) => at > sentAt,
+    );
+    expect(resentAt - sentAt).toBeGreaterThanOrEqual(2 * latency);
+    expect(resentAt - sentAt).toBeLessThanOrEqual(2 * latency + 40);
+    expect(pair.atServer.slice(deliveredBefore)).toEqual([
+      { id: 2, body: Uint8Array.of(42), at: resentAt + latency },
+    ]);
+    // A Datagram within the next second would be a resend: an idle Client only sends a keepalive after a second.
+    expect(later.filter((at) => at < resentAt + 1000)).toEqual([]);
   }
 });
 

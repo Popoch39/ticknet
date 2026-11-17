@@ -5,6 +5,7 @@ import {
   CLIENT_HANDSHAKE_SIZE,
   decodeDatagram,
   encodeDatagram,
+  type CloseNoticeReason,
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
@@ -200,7 +201,7 @@ export class ServerEngine implements Engine<ServerEvent> {
       case "close": {
         const open = this.#byAddress.get(addressKey(from));
         // A Server never takes a Client's word that the Server closed.
-        if (open && datagram.reason.kind === "closedByClient")
+        if (open && datagram.reason.kind !== "closedByServer")
           this.#forget(open, datagram.reason);
         break;
       }
@@ -240,10 +241,7 @@ export class ServerEngine implements Engine<ServerEvent> {
   close(connection: ConnectionId, code: number): void {
     assertCloseCode(code, "close");
     const open = this.#byId.get(connection);
-    if (!open) return;
-    const reason = { kind: "closedByServer", code } as const;
-    this.#send(open.address, encodeDatagram({ kind: "close", reason }));
-    this.#forget(open, reason);
+    if (open) this.#closeOpen(open, { kind: "closedByServer", code });
   }
 
   /**
@@ -297,9 +295,14 @@ export class ServerEngine implements Engine<ServerEvent> {
   pollDatagrams(): OutgoingDatagram[] {
     if (this.#tickState === "ending") {
       this.#tickState = "between";
-      for (const open of this.#byId.values())
+      for (const open of this.#byId.values()) {
+        if (open.link.reliableBacklogOverflowed) {
+          this.#closeOpen(open, { kind: "reliableBacklogOverflow" });
+          continue;
+        }
         for (const data of open.link.flush(this.#tick, this.#tickStartedAt))
           this.#datagrams.push({ to: open.address, data });
+      }
     }
     const datagrams = this.#datagrams;
     this.#datagrams = [];
@@ -316,6 +319,12 @@ export class ServerEngine implements Engine<ServerEvent> {
   #heardFrom(connection: ConnectionId, now: number): void {
     this.#silenceDeadlines.delete(connection);
     this.#silenceDeadlines.set(connection, now + this.#timeout);
+  }
+
+  /** Tells the Client why its open Connection closes, then forgets it; what is still queued for it is dropped. */
+  #closeOpen(open: OpenConnection, reason: CloseNoticeReason): void {
+    this.#send(open.address, encodeDatagram({ kind: "close", reason }));
+    this.#forget(open, reason);
   }
 
   #forget(open: OpenConnection, reason: CloseReason): void {

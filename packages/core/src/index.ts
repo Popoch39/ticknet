@@ -21,6 +21,7 @@ export {
   type MessageType,
 } from "./message";
 export { MessageRouter } from "./message-router";
+export { MAX_RELIABLE_BACKLOG } from "./reliable-stream";
 export type { ConnectionHealth } from "./sent-datagrams";
 export {
   ServerEngine,

@@ -171,3 +171,32 @@ test("a Sequenced Message crosses real sockets in each direction and reaches its
   client.close();
   server.stop();
 });
+
+test("a Reliable Message crosses real sockets in each direction and reaches its typed handler", async () => {
+  const messages = defineMessages({
+    chat: {
+      id: 1,
+      encode: (value: string) => new TextEncoder().encode(value),
+      decode: (data: Uint8Array) => new TextDecoder().decode(data),
+    },
+  });
+  const server = await startServer({});
+  const toServer = new Promise<[Connection, string]>((resolve) =>
+    server.onMessage(messages.chat, (connection, value) =>
+      resolve([connection, value]),
+    ),
+  );
+  const client = await connect({ host: "127.0.0.1", port: portOf(server) });
+  const toClient = new Promise<string>((resolve) =>
+    client.onMessage(messages.chat, resolve),
+  );
+
+  client.send(messages.chat, "gg", "reliable");
+  const [connection, received] = await toServer;
+  connection.send(messages.chat, "wp", "reliable");
+
+  expect(received).toBe("gg");
+  expect(await toClient).toBe("wp");
+  client.close();
+  server.stop();
+});

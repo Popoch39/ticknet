@@ -1,6 +1,5 @@
 import { CHALLENGE_SIZE } from "./challenge";
 import type { CloseReason } from "./close-reason";
-import type { DeliveryMode } from "./message";
 
 /**
  * Wire format. Every Datagram starts with the protocol version byte, then a
@@ -56,11 +55,12 @@ const MAX_ACKNOWLEDGEMENT_DELAY = 0xffff;
 /**
  * Each Message entry is a type byte, the Message id (16 bits), the type's own
  * fields, the body length (16 bits), then the body. An Unreliable entry has no
- * fields of its own; a Sequenced entry has its sequence number (16 bits). The
- * type byte leaves room for Reliable and Fragment entries.
+ * fields of its own; a Sequenced or a Reliable entry has its sequence number
+ * (16 bits). The type byte leaves room for Fragment entries.
  */
 const ENTRY_UNRELIABLE = 1;
 const ENTRY_SEQUENCED = 2;
+const ENTRY_RELIABLE = 3;
 const UNRELIABLE_HEADER_SIZE = 5;
 const SEQUENCED_HEADER_SIZE = 7;
 
@@ -69,6 +69,9 @@ const SEQUENCED_HEADER_SIZE = 7;
  * long-running Connection wraps them: they are compared with `isNewer`.
  */
 export const SEQUENCED_SEQUENCE_MASK = 0xffff;
+
+/** Reliable sequence numbers count modulo 2^16 too, over every Reliable Message of one side of a Connection. */
+export const RELIABLE_SEQUENCE_MASK = 0xffff;
 
 /**
  * The largest Message body that fits in one Datagram, whatever its Delivery
@@ -92,21 +95,22 @@ const REFUSED_SIZE = HEADER_SIZE + 1;
 const REFUSED_DENIED_SIZE = REFUSED_SIZE + 2;
 
 /** The reasons one side of an open Connection can tell the other it closed it for. */
-type CloseNoticeReason = Extract<
+export type CloseNoticeReason = Extract<
   CloseReason,
-  { kind: "closedByClient" | "closedByServer" }
+  { kind: "closedByClient" | "closedByServer" | "reliableBacklogOverflow" }
 >;
 
 const CLOSED_BY_CLIENT = 1;
 const CLOSED_BY_SERVER = 2;
+const CLOSED_FOR_RELIABLE_BACKLOG_OVERFLOW = 3;
 
 /** A close notice is its reason byte, followed by the game's 16-bit code when the Server closed. */
-const CLOSED_BY_CLIENT_SIZE = HEADER_SIZE + 1;
-const CLOSED_BY_SERVER_SIZE = CLOSED_BY_CLIENT_SIZE + 2;
+const CLOSE_NOTICE_SIZE = HEADER_SIZE + 1;
+const CLOSED_BY_SERVER_SIZE = CLOSE_NOTICE_SIZE + 2;
 
 export type MessageEntry =
   | {
-      readonly delivery: Exclude<DeliveryMode, "sequenced">;
+      readonly delivery: "unreliable";
       readonly id: number;
       readonly body: Uint8Array;
     }
@@ -116,7 +120,16 @@ export type MessageEntry =
       /** Counts the Sequenced Messages of this type one side sent on one Connection, wrapping at 2^16. */
       readonly sequence: number;
       readonly body: Uint8Array;
+    }
+  | {
+      readonly delivery: "reliable";
+      readonly id: number;
+      /** Counts the Reliable Messages, of every type, one side sent on one Connection, wrapping at 2^16. */
+      readonly sequence: number;
+      readonly body: Uint8Array;
     };
+
+export type ReliableEntry = Extract<MessageEntry, { delivery: "reliable" }>;
 
 /**
  * Whether Sequenced sequence number `a` was sent after `b`: it is, when it is
@@ -147,6 +160,15 @@ export interface Acknowledgement {
 
 /** How many sequence numbers one acknowledgement covers, ending at its newest. */
 export const ACKNOWLEDGEMENT_SPAN = 32;
+
+/**
+ * How many connected Datagrams after `b` the one numbered `a` was sent,
+ * negative if before. Datagram sequence numbers count modulo 2^32, so this
+ * takes the shorter way round the wrap.
+ */
+export function sequenceDistance(a: number, b: number): number {
+  return (a - b) | 0;
+}
 
 export type Datagram =
   | { readonly kind: "connectRequest" }
@@ -201,28 +223,42 @@ export function encodeDatagram(datagram: Datagram): Uint8Array {
     case "connected":
       return encodeConnected(datagram);
     case "close":
-      return datagram.reason.kind === "closedByClient"
-        ? withHeader(
-            KIND_CLOSE,
-            CLOSED_BY_CLIENT_SIZE,
-            Uint8Array.of(CLOSED_BY_CLIENT),
-          )
-        : withHeader(
-            KIND_CLOSE,
-            CLOSED_BY_SERVER_SIZE,
-            Uint8Array.of(
-              CLOSED_BY_SERVER,
-              datagram.reason.code >>> 8,
-              datagram.reason.code & 0xff,
-            ),
-          );
+      return encodeClose(datagram.reason);
+  }
+}
+
+function encodeClose(reason: CloseNoticeReason): Uint8Array {
+  switch (reason.kind) {
+    case "closedByClient":
+      return withHeader(
+        KIND_CLOSE,
+        CLOSE_NOTICE_SIZE,
+        Uint8Array.of(CLOSED_BY_CLIENT),
+      );
+    case "reliableBacklogOverflow":
+      return withHeader(
+        KIND_CLOSE,
+        CLOSE_NOTICE_SIZE,
+        Uint8Array.of(CLOSED_FOR_RELIABLE_BACKLOG_OVERFLOW),
+      );
+    case "closedByServer":
+      return withHeader(
+        KIND_CLOSE,
+        CLOSED_BY_SERVER_SIZE,
+        Uint8Array.of(CLOSED_BY_SERVER, reason.code >>> 8, reason.code & 0xff),
+      );
   }
 }
 
 function decodeClose(data: Uint8Array): Datagram | undefined {
   const reason = data[HEADER_SIZE];
-  if (data.byteLength === CLOSED_BY_CLIENT_SIZE && reason === CLOSED_BY_CLIENT)
+  if (data.byteLength === CLOSE_NOTICE_SIZE && reason === CLOSED_BY_CLIENT)
     return { kind: "close", reason: { kind: "closedByClient" } };
+  if (
+    data.byteLength === CLOSE_NOTICE_SIZE &&
+    reason === CLOSED_FOR_RELIABLE_BACKLOG_OVERFLOW
+  )
+    return { kind: "close", reason: { kind: "reliableBacklogOverflow" } };
   if (
     data.byteLength === CLOSED_BY_SERVER_SIZE &&
     reason === CLOSED_BY_SERVER
@@ -276,9 +312,9 @@ function decodeRefused(data: Uint8Array): Datagram | undefined {
 /** The bytes `message` takes in a connected Datagram. */
 function entrySize(message: MessageEntry): number {
   const header =
-    message.delivery === "sequenced"
-      ? SEQUENCED_HEADER_SIZE
-      : UNRELIABLE_HEADER_SIZE;
+    message.delivery === "unreliable"
+      ? UNRELIABLE_HEADER_SIZE
+      : SEQUENCED_HEADER_SIZE;
   return header + message.body.byteLength;
 }
 
@@ -333,8 +369,11 @@ function encodeConnected({
   for (const message of messages) {
     view.setUint16(offset + 1, message.id);
     let bodyStart: number;
-    if (message.delivery === "sequenced") {
-      view.setUint8(offset, ENTRY_SEQUENCED);
+    if (message.delivery !== "unreliable") {
+      view.setUint8(
+        offset,
+        message.delivery === "sequenced" ? ENTRY_SEQUENCED : ENTRY_RELIABLE,
+      );
       view.setUint16(offset + 3, message.sequence);
       view.setUint16(offset + 5, message.body.byteLength);
       bodyStart = offset + SEQUENCED_HEADER_SIZE;
@@ -359,7 +398,7 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
     const headerSize =
       type === ENTRY_UNRELIABLE
         ? UNRELIABLE_HEADER_SIZE
-        : type === ENTRY_SEQUENCED
+        : type === ENTRY_SEQUENCED || type === ENTRY_RELIABLE
           ? SEQUENCED_HEADER_SIZE
           : undefined;
     if (headerSize === undefined || offset + headerSize > data.byteLength)
@@ -371,14 +410,14 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
     if (bodyEnd > data.byteLength) return undefined;
     const body = data.slice(bodyStart, bodyEnd);
     messages.push(
-      type === ENTRY_SEQUENCED
-        ? {
-            delivery: "sequenced",
+      type === ENTRY_UNRELIABLE
+        ? { delivery: "unreliable", id, body }
+        : {
+            delivery: type === ENTRY_SEQUENCED ? "sequenced" : "reliable",
             id,
             sequence: view.getUint16(offset + 3),
             body,
-          }
-        : { delivery: "unreliable", id, body },
+          },
     );
     offset = bodyEnd;
   }

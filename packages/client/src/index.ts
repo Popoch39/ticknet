@@ -1,6 +1,7 @@
 export {
   defineMessages,
   MAX_AUTH_TOKEN_SIZE,
+  MAX_RELIABLE_BACKLOG,
   PROTOCOL_VERSION,
   type Address,
   type Clock,

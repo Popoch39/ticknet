@@ -1,6 +1,5 @@
 import {
   MAX_DATAGRAM_MESSAGE_SIZE,
-  packMessages,
   SEQUENCED_SEQUENCE_MASK,
   type MessageEntry,
 } from "./datagram";
@@ -21,11 +20,12 @@ export function assertFitsInDatagram(
 const MODE_NAMES: Record<DeliveryMode, string> = {
   unreliable: "an Unreliable",
   sequenced: "a Sequenced",
+  reliable: "a Reliable",
 };
 
 /**
- * The Messages one endpoint has sent on a Connection and not yet put on the
- * network. They leave together, in as few Datagrams as possible, when the
+ * The Unreliable and Sequenced Messages one endpoint has sent on a
+ * Connection and not yet put on the network. They leave together when the
  * outbox is taken.
  */
 export class Outbox {
@@ -34,7 +34,11 @@ export class Outbox {
   readonly #nextSequenced = new Map<number, number>();
 
   /** Throws a RangeError, before queuing anything, for a body that cannot fit in one Datagram. */
-  push(id: number, body: Uint8Array, delivery: DeliveryMode): void {
+  push(
+    id: number,
+    body: Uint8Array,
+    delivery: Exclude<DeliveryMode, "reliable">,
+  ): void {
     assertFitsInDatagram(id, body, delivery);
     if (delivery === "sequenced") {
       const sequence = this.#nextSequenced.get(id) ?? 0;
@@ -43,10 +47,10 @@ export class Outbox {
     } else this.#messages.push({ delivery, id, body });
   }
 
-  /** Empties the outbox into the groups of Messages that each fill one connected Datagram. */
-  take(): MessageEntry[][] {
-    const groups = packMessages(this.#messages);
+  /** Empties the outbox, returning its Messages in send order. */
+  take(): MessageEntry[] {
+    const messages = this.#messages;
     this.#messages = [];
-    return groups;
+    return messages;
   }
 }

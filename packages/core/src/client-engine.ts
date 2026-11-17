@@ -4,6 +4,7 @@ import {
   decodeDatagram,
   encodeDatagram,
   MAX_AUTH_TOKEN_SIZE,
+  type CloseNoticeReason,
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
@@ -113,13 +114,7 @@ export class ClientEngine implements Engine<ClientEvent> {
   close(): void {
     if (this.#state === "closed") return;
     if (this.#state === "connected")
-      this.#datagrams.push({
-        to: this.#server,
-        data: encodeDatagram({
-          kind: "close",
-          reason: { kind: "closedByClient" },
-        }),
-      });
+      this.#tellServer({ kind: "closedByClient" });
     this.#close({ kind: "closedByClient" });
   }
 
@@ -173,10 +168,10 @@ export class ClientEngine implements Engine<ClientEvent> {
         break;
       }
       case "close":
-        // A Client never closes the Server's side; only the Server's own notice counts.
+        // A Server never says the Client closed: only a notice of the Server's own counts.
         if (
           this.#state !== "requesting" &&
-          datagram.reason.kind === "closedByServer"
+          datagram.reason.kind !== "closedByClient"
         )
           this.#close(datagram.reason);
         break;
@@ -192,6 +187,12 @@ export class ClientEngine implements Engine<ClientEvent> {
       this.#close({ kind: "timeout" });
     if (this.#state === "connected" && now >= this.#sendSteps.next) {
       this.#step++;
+      if (this.#link.reliableBacklogOverflowed) {
+        const reason = { kind: "reliableBacklogOverflow" } as const;
+        this.#tellServer(reason);
+        this.#close(reason);
+        return;
+      }
       for (const data of this.#link.flush(this.#step, now))
         this.#datagrams.push({ to: this.#server, data });
       // A late wake-up takes one step, not one per interval missed: a single flush covers them all.
@@ -224,6 +225,14 @@ export class ClientEngine implements Engine<ClientEvent> {
     this.#handshakeDatagram = data;
     this.#handshakeResendAt = now + HANDSHAKE_RESEND_INTERVAL;
     this.#datagrams.push({ to: this.#server, data });
+  }
+
+  /** Sends the close notice of an open Connection; queued Messages are dropped. */
+  #tellServer(reason: CloseNoticeReason): void {
+    this.#datagrams.push({
+      to: this.#server,
+      data: encodeDatagram({ kind: "close", reason }),
+    });
   }
 
   #inHandshake(): boolean {

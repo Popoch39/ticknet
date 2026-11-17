@@ -10,7 +10,12 @@ export type CloseReason =
   /** The Client left on purpose. */
   | { readonly kind: "closedByClient" }
   /** The Server closed the Connection, or stopped, with the game's code. */
-  | { readonly kind: "closedByServer"; readonly code: number };
+  | { readonly kind: "closedByServer"; readonly code: number }
+  /**
+   * One side had more Reliable Messages waiting for acknowledgement than
+   * MAX_RELIABLE_BACKLOG; both sides close with this reason.
+   */
+  | { readonly kind: "reliableBacklogOverflow" };
 
 /** The largest code a game can attach to a denial or a close; codes travel as 16-bit integers. */
 export const MAX_CLOSE_CODE = 0xffff;

@@ -1,4 +1,8 @@
-import { ACKNOWLEDGEMENT_SPAN, type Acknowledgement } from "./datagram";
+import {
+  ACKNOWLEDGEMENT_SPAN,
+  sequenceDistance,
+  type Acknowledgement,
+} from "./datagram";
 
 /**
  * How far behind the newest sequence number a Datagram can be and still be
@@ -19,13 +23,20 @@ export class ReceivedSequences {
 
   /** Records `sequence`, received at `now`; false if it was already received or is too old to tell. */
   accept(sequence: number, now: number): boolean {
-    if (this.#newest !== undefined && sequence <= this.#newest - WINDOW)
+    if (
+      this.#newest !== undefined &&
+      sequenceDistance(this.#newest, sequence) >= WINDOW
+    )
       return false;
+    // WINDOW divides 2^32, so slots follow each other across the wrap too.
     const slot = sequence % WINDOW;
     // A slot is overwritten only by a sequence number WINDOW or more newer, which puts the old one out of the window.
     if (this.#slots[slot] === sequence) return false;
     this.#slots[slot] = sequence;
-    if (this.#newest === undefined || sequence > this.#newest) {
+    if (
+      this.#newest === undefined ||
+      sequenceDistance(sequence, this.#newest) > 0
+    ) {
       this.#newest = sequence;
       this.#newestAt = now;
     }
@@ -37,9 +48,10 @@ export class ReceivedSequences {
     const newest = this.#newest;
     if (newest === undefined) return { newest: 0, received: 0, delay: 0 };
     let received = 0;
-    for (let age = 0; age < ACKNOWLEDGEMENT_SPAN && age <= newest; age++)
-      if (this.#slots[(newest - age) % WINDOW] === newest - age)
-        received |= 1 << age;
+    for (let age = 0; age < ACKNOWLEDGEMENT_SPAN; age++) {
+      const sequence = (newest - age) >>> 0;
+      if (this.#slots[sequence % WINDOW] === sequence) received |= 1 << age;
+    }
     return { newest, received: received >>> 0, delay: now - this.#newestAt };
   }
 }

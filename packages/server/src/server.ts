@@ -102,7 +102,8 @@ export class Connection<Data = undefined> {
   /**
    * Sends a Message to this Client when the current Tick ends. Throws at once
    * if the Message cannot fit in one Datagram, or if the Connection has
-   * closed.
+   * closed. A Reliable Message is sent again until the Client acknowledges
+   * it; with more than MAX_RELIABLE_BACKLOG waiting, the Connection closes.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#link.send(type.id, type.encode(value), delivery);
@@ -123,8 +124,9 @@ export interface ServerEvents<Data = undefined> {
   connectionOpened: (connection: Connection<Data>) => void;
   /**
    * Runs once for every Connection that opened, whichever side ended it:
-   * the Client left, the Server closed it or stopped, or it timed out. No
-   * Message from it is delivered afterwards.
+   * the Client left, the Server closed it or stopped, it timed out, or
+   * either side had more Reliable Messages waiting for acknowledgement than
+   * MAX_RELIABLE_BACKLOG. No Message from it is delivered afterwards.
    */
   connectionClosed: (connection: Connection<Data>, reason: CloseReason) => void;
   /** Runs once per Tick, before everything sent during the Tick leaves. */
