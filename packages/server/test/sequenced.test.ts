@@ -12,8 +12,7 @@ import {
   type Connection,
   type Server,
 } from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
+import { SERVER, settle } from "./support";
 
 /** A 32-bit unsigned integer, big-endian. */
 const u32 = {
@@ -30,9 +29,6 @@ const messages = defineMessages({
   position: { id: 1, ...u32 },
   heading: { id: 2, ...u32 },
 });
-
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 const range = (count: number) => Array.from({ length: count }, (_, i) => i);
 

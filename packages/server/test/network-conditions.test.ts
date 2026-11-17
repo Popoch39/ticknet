@@ -1,20 +1,13 @@
 import { expect, test } from "bun:test";
-import { connect, type Client } from "@ticknet/client";
+import type { Client } from "@ticknet/client";
 import {
   ManualClock,
-  SimulatedNetwork,
   withNetworkConditions,
   type EndpointConditions,
   type NetworkConditions,
 } from "@ticknet/core/testing";
-import {
-  defineMessages,
-  startServer,
-  type Connection,
-  type Server,
-} from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
+import { defineMessages, type Connection, type Server } from "@ticknet/server";
+import { settle, setup as setupServer } from "./support";
 
 const messages = defineMessages({
   count: {
@@ -36,55 +29,18 @@ async function setup(
     server?: EndpointConditions;
   } = {},
 ) {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({
-    clock,
+  const tested = await setupServer({
     seed: options.seed,
     conditions: options.conditions,
-  });
-  const server = await startServer({
-    transport: network.bind(SERVER, options.server),
-    clock,
+    serverConditions: options.server,
     tickRate: 10,
   });
-  const opened: Connection[] = [];
-  server.on("connectionOpened", (connection) => opened.push(connection));
-  let nextPort = 50000;
 
   /** Connects a Client, moving the Clock only as far as the Handshake needs. */
-  async function connectClient(): Promise<{
-    client: Client;
-    connection: Connection;
-  }> {
-    let client: Client | undefined;
-    let failure: unknown;
-    connect({
-      ...SERVER,
-      transport: network.bind({ host: "10.0.0.2", port: nextPort++ }),
-      clock,
-      sendRate: 10,
-    }).then(
-      (connected) => (client = connected),
-      (error: unknown) => (failure = error),
-    );
-    while (!client && failure === undefined) {
-      clock.advance(1);
-      await settle();
-    }
-    if (!client) throw failure;
-    const connection = opened.find(
-      ({ address }) => address.port === nextPort - 1,
-    );
-    if (!connection)
-      throw new Error("Expected the Server to open a Connection");
-    return { client, connection };
-  }
+  const connectClient = () => tested.connectClient(undefined, { sendRate: 10 });
 
-  return { clock, network, server, connectClient };
+  return { ...tested, connectClient };
 }
-
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 const range = (count: number) => Array.from({ length: count }, (_, i) => i);
 
@@ -235,12 +191,9 @@ test("loss on the Client-to-Server path only leaves the Server-to-Client path wh
 });
 
 test("a Client's injected Transport can be wrapped in network conditions, which run on the Client's own Clock", async () => {
-  const { clock, network } = await setup();
+  const { clock, connectFrom } = await setup();
   let connected = false;
-  connect({
-    ...SERVER,
-    transport: network.bind({ host: "10.0.0.2", port: 50000 }),
-    clock,
+  connectFrom(undefined, {
     wrapTransport: (transport, wrapClock) =>
       withNetworkConditions(transport, {
         clock: wrapClock,

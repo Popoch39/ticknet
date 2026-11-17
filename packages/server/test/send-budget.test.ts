@@ -16,8 +16,8 @@ import {
   startServer,
   type Connection,
 } from "@ticknet/server";
+import { SERVER, settle } from "./support";
 
-const SERVER = { host: "10.0.0.1", port: 4000 };
 const CLIENT = { host: "10.0.0.2", port: 50000 };
 
 const messages = defineMessages({
@@ -37,9 +37,6 @@ const messages = defineMessages({
       new DataView(data.buffer, data.byteOffset, data.byteLength).getUint32(0),
   },
 });
-
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 const range = (count: number) => Array.from({ length: count }, (_, i) => i);
 

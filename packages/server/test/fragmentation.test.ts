@@ -1,25 +1,18 @@
 import { expect, test } from "bun:test";
-import { connect, type Client } from "@ticknet/client";
+import type { Client } from "@ticknet/client";
 import {
   MAX_DATAGRAM_MESSAGE_SIZE,
   MAX_DATAGRAM_SIZE,
   type OutgoingDatagram,
   type Transport,
 } from "@ticknet/core";
-import {
-  ManualClock,
-  SimulatedNetwork,
-  type NetworkConditions,
-} from "@ticknet/core/testing";
+import type { NetworkConditions } from "@ticknet/core/testing";
 import {
   defineMessages,
   MAX_RELIABLE_MESSAGE_SIZE,
-  startServer,
-  type Connection,
   type Server,
 } from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
+import { setup } from "./support";
 
 const messages = defineMessages({
   blob: {
@@ -28,9 +21,6 @@ const messages = defineMessages({
     decode: (data: Uint8Array) => data,
   },
 });
-
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 /** `size` bytes that differ from one `seed` to another and along their length, so that a misplaced piece shows. */
 function bytes(size: number, seed = 1): Uint8Array {
@@ -45,35 +35,36 @@ function bytes(size: number, seed = 1): Uint8Array {
 
 const STEP = 50;
 
-/** Wraps a Transport to record every Datagram sent through it. */
-function recorded(transport: Transport) {
+/** Records every Datagram sent through the Transports it wraps. */
+function recorder() {
   const sent: OutgoingDatagram[] = [];
-  const recording: Transport = {
-    listen: (receiver) => transport.listen(receiver),
-    send: (datagrams) => {
-      sent.push(...datagrams);
-      return transport.send(datagrams);
-    },
-    close: () => transport.close(),
+  return {
+    sent,
+    wrap: (transport: Transport): Transport => ({
+      listen: (receiver) => transport.listen(receiver),
+      send: (datagrams) => {
+        sent.push(...datagrams);
+        return transport.send(datagrams);
+      },
+      close: () => transport.close(),
+    }),
   };
-  return { transport: recording, sent };
 }
 
-/** Wraps a Transport so that, while thinned, every other Datagram its endpoint sends is lost on the way. */
-function thinnable(transport: Transport) {
+/** A switch that, while thinned, loses every other Datagram sent through the Transports it wraps. */
+function thinnable() {
   let thinned = false;
-  const wrapped: Transport = {
-    listen: (receiver) => transport.listen(receiver),
-    send: (datagrams) => {
-      if (!thinned) return transport.send(datagrams);
-      // The lost ones count as sent: they were accepted, then lost.
-      transport.send(datagrams.filter((_, index) => index % 2 === 0));
-      return datagrams.length;
-    },
-    close: () => transport.close(),
-  };
   return {
-    transport: wrapped,
+    wrap: (transport: Transport): Transport => ({
+      listen: (receiver) => transport.listen(receiver),
+      send: (datagrams) => {
+        if (!thinned) return transport.send(datagrams);
+        // The lost ones count as sent: they were accepted, then lost.
+        transport.send(datagrams.filter((_, index) => index % 2 === 0));
+        return datagrams.length;
+      },
+      close: () => transport.close(),
+    }),
     thin: () => {
       thinned = true;
     },
@@ -85,22 +76,6 @@ function thinnable(transport: Transport) {
 
 const CLIENT = { host: "10.0.0.2", port: 50000 };
 
-/** Connects a Client sending at 20 Hz through `transport`, moving the Clock until it is connected. */
-async function connectClient(clock: ManualClock, transport: Transport) {
-  let client: Client | undefined;
-  let failure: unknown;
-  connect({ ...SERVER, transport, clock, sendRate: 1000 / STEP }).then(
-    (opened) => (client = opened),
-    (error: unknown) => (failure = error),
-  );
-  while (!client && failure === undefined) {
-    clock.advance(1);
-    await settle();
-  }
-  if (!client) throw failure;
-  return client;
-}
-
 /**
  * A Server at 20 Ticks per second and one Client sending at 20 Hz from
  * CLIENT, connected over a simulated network with the given conditions.
@@ -110,26 +85,24 @@ async function connectClient(clock: ManualClock, transport: Transport) {
 async function connected(
   options: { seed?: number; conditions?: NetworkConditions } = {},
 ) {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({
-    clock,
-    seed: options.seed,
-    conditions: options.conditions,
-  });
-  const serverSide = recorded(network.bind(SERVER));
-  const server = await startServer({
-    transport: serverSide.transport,
-    clock,
+  const serverSide = recorder();
+  const { clock, server, connectClient } = await setup({
+    ...options,
     tickRate: 1000 / STEP,
+    wrapServer: serverSide.wrap,
   });
-  let connection: Connection | undefined;
-  server.on("connectionOpened", (opened) => (connection = opened));
-  const clientLink = thinnable(network.bind(CLIENT));
-  const clientSide = recorded(clientLink.transport);
-  const client = await connectClient(clock, clientSide.transport);
-  if (!connection) throw new Error("Expected the Server to open a Connection");
+  const clientLink = thinnable();
+  const clientSide = recorder();
+  const sendRate = 1000 / STEP;
+  const { client, connection } = await connectClient(CLIENT, {
+    sendRate,
+    wrap: (transport) => clientSide.wrap(clientLink.wrap(transport)),
+  });
   const sent = () => [...serverSide.sent, ...clientSide.sent];
-  return { clock, network, server, client, connection, clientLink, sent };
+  /** Connects a new Client from CLIENT, as the first one did, without recording or thinning it. */
+  const reconnect = async () =>
+    (await connectClient(CLIENT, { sendRate })).client;
+  return { clock, server, client, connection, clientLink, sent, reconnect };
 }
 
 /** Records, on each side, the blobs delivered from the other. */
@@ -275,7 +248,7 @@ test("a Reliable Message of the documented maximum size is delivered, and one by
 });
 
 test("a Connection that closes in the middle of a large Reliable Message drops the partial Message, and a new Connection from the same address starts afresh", async () => {
-  const { clock, network, server, client, clientLink } = await connected();
+  const { clock, server, client, clientLink, reconnect } = await connected();
   const atServer: Uint8Array[] = [];
   server.onMessage(messages.blob, (_from, value) => atServer.push(value));
   const closed: string[] = [];
@@ -293,7 +266,7 @@ test("a Connection that closes in the middle of a large Reliable Message drops t
   expect(closed).toEqual(["closedByClient"]);
   expect(atServer).toEqual([]);
 
-  const again = await connectClient(clock, network.bind(CLIENT));
+  const again = await reconnect();
   const resent = bytes(20_000, 2);
   again.send(messages.blob, resent, "reliable");
   clock.advance(5000);

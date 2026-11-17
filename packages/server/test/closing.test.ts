@@ -1,30 +1,26 @@
 import { expect, test } from "bun:test";
-import { connect, type CloseReason } from "@ticknet/client";
+import type { CloseReason } from "@ticknet/client";
 import type { Transport } from "@ticknet/core";
-import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
 import {
   defineMessages,
   MAX_CLOSE_CODE,
-  startServer,
   type Address,
   type Connection,
 } from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
+import { setup as setupServer } from "./support";
 
 /**
- * Wraps a Transport so that a test can silence its endpoint: while cut,
+ * A switch that silences the endpoint whose Transport it wraps: while cut,
  * whatever it sends is lost on the way, as if its link had gone down.
  */
-function cuttable(transport: Transport) {
+function cuttable() {
   let cut = false;
-  const wrapped: Transport = {
-    listen: (receiver) => transport.listen(receiver),
-    send: (datagrams) => (cut ? datagrams.length : transport.send(datagrams)),
-    close: () => transport.close(),
-  };
   return {
-    transport: wrapped,
+    wrap: (transport: Transport): Transport => ({
+      listen: (receiver) => transport.listen(receiver),
+      send: (datagrams) => (cut ? datagrams.length : transport.send(datagrams)),
+      close: () => transport.close(),
+    }),
     cut: () => {
       cut = true;
     },
@@ -44,49 +40,31 @@ const messages = defineMessages({
 
 /**
  * A Server on a simulated network at time 0, recording the Connections it
- * opens and closes, and a way to connect Clients to it.
+ * opens and closes, and a way to connect Clients to it. Each side's link can
+ * be cut, and each Client records why it closed.
  */
 async function setup(
   options: { timeout?: number; clientTimeout?: number } = {},
 ) {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({ clock });
-  const serverLink = cuttable(network.bind(SERVER));
-  const server = await startServer({
-    transport: serverLink.transport,
-    clock,
+  const serverLink = cuttable();
+  const tested = await setupServer({
     timeout: options.timeout,
+    wrapServer: serverLink.wrap,
   });
-  const opened: Connection[] = [];
-  const closed: [Connection, CloseReason][] = [];
-  server.on("connectionOpened", (connection) => opened.push(connection));
-  server.on("connectionClosed", (connection, reason) =>
-    closed.push([connection, reason]),
-  );
-  let nextPort = 50000;
 
   /** Connects a Client without moving the Clock past the Handshake. */
-  async function connectClient(
-    address: Address = { host: "10.0.0.2", port: nextPort++ },
-  ) {
-    const link = cuttable(network.bind(address));
-    const connecting = connect({
-      ...SERVER,
-      transport: link.transport,
-      clock,
+  async function connectClient(address?: Address) {
+    const link = cuttable();
+    const { client, connection } = await tested.connectClient(address, {
       timeout: options.clientTimeout,
+      wrap: link.wrap,
     });
-    clock.advance(0);
-    const client = await connecting;
-    const connection = opened.at(-1);
-    if (!connection)
-      throw new Error("Expected the Server to open a Connection");
     const clientClosed: CloseReason[] = [];
     client.on("connectionClosed", (reason) => clientClosed.push(reason));
     return { client, connection, link, closed: clientClosed };
   }
 
-  return { clock, server, serverLink, opened, closed, connectClient };
+  return { ...tested, serverLink, connectClient };
 }
 
 test("a Client that disconnects on purpose closes its Connection on the Server at once, with a closed-by-Client reason", async () => {

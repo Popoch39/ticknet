@@ -1,20 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { connect } from "@ticknet/client";
-import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
-import { startServer, type Connection } from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
-
-async function setup() {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({ clock });
-  const server = await startServer({ transport: network.bind(SERVER), clock });
-  const opened: Connection[] = [];
-  server.on("connectionOpened", (connection) => opened.push(connection));
-  const connectFrom = (address: { host: string; port: number }) =>
-    connect({ ...SERVER, transport: network.bind(address), clock });
-  return { clock, opened, connectFrom };
-}
+import { setup } from "./support";
 
 test("a Client connects to a Server, which is told a Connection opened", async () => {
   const { clock, opened, connectFrom } = await setup();

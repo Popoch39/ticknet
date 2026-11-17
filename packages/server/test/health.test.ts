@@ -12,8 +12,8 @@ import {
   type Server,
   type Transport,
 } from "@ticknet/server";
+import { SERVER, settle } from "./support";
 
-const SERVER = { host: "10.0.0.1", port: 4000 };
 const CLIENT = { host: "10.0.0.2", port: 50000 };
 
 const messages = defineMessages({
@@ -23,9 +23,6 @@ const messages = defineMessages({
     decode: (data: Uint8Array) => data[0] ?? 0,
   },
 });
-
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 /**
  * A Server and one connected Client on a simulated network with the given

@@ -1,15 +1,12 @@
 import { expect, test } from "bun:test";
-import { ConnectError, MAX_AUTH_TOKEN_SIZE, connect } from "@ticknet/client";
-import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
-import {
-  startServer,
-  type Address,
-  type Authenticate,
-  type AuthenticationDecision,
-  type Connection,
+import { ConnectError, MAX_AUTH_TOKEN_SIZE } from "@ticknet/client";
+import type {
+  Address,
+  Authenticate,
+  AuthenticationDecision,
 } from "@ticknet/server";
+import { settle, setup } from "./support";
 
-const SERVER = { host: "10.0.0.1", port: 4000 };
 const CLIENT = { host: "10.0.0.2", port: 50000 };
 
 /**
@@ -33,37 +30,17 @@ function track(promise: Promise<unknown>): {
   return outcome;
 }
 
-/** Lets every pending promise callback run, without moving the Clock. */
-const settle = () => new Promise((resolve) => setImmediate(resolve));
-
-async function setup<Data>(
-  authenticate: Authenticate<Data>,
-  options: { maxConnections?: number; timeout?: number } = {},
-) {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({ clock });
-  const server = await startServer({
-    ...options,
-    transport: network.bind(SERVER),
-    clock,
-    authenticate,
-  });
-  const opened: Connection<Data>[] = [];
-  server.on("connectionOpened", (connection) => opened.push(connection));
-  const connectFrom = (address: Address, authToken?: Uint8Array) =>
-    connect({ ...SERVER, transport: network.bind(address), clock, authToken });
-  return { clock, network, server, opened, connectFrom };
-}
-
 test("the Client's Auth token reaches the authentication callback unchanged, with the Client's address", async () => {
   const requests: { authToken: Uint8Array; address: Address }[] = [];
-  const { clock, connectFrom } = await setup((request) => {
-    requests.push(request);
-    return { accept: true };
+  const { clock, connectFrom } = await setup({
+    authenticate: (request) => {
+      requests.push(request);
+      return { accept: true };
+    },
   });
   const authToken = Uint8Array.of(0, 255, 7, 0, 42);
 
-  const connecting = connectFrom(CLIENT, authToken);
+  const connecting = connectFrom(CLIENT, { authToken });
   clock.advance(0);
   await connecting;
 
@@ -74,16 +51,18 @@ test("the Client's Auth token reaches the authentication callback unchanged, wit
 
 test("an Auth token of the largest size that fits in the Handshake reaches the callback whole", async () => {
   const tokens: Uint8Array[] = [];
-  const { clock, connectFrom } = await setup(({ authToken }) => {
-    tokens.push(authToken);
-    return { accept: true };
+  const { clock, connectFrom } = await setup({
+    authenticate: ({ authToken }) => {
+      tokens.push(authToken);
+      return { accept: true };
+    },
   });
   const authToken = Uint8Array.from(
     { length: MAX_AUTH_TOKEN_SIZE },
     (_, index) => index % 251,
   );
 
-  const connecting = connectFrom(CLIENT, authToken);
+  const connecting = connectFrom(CLIENT, { authToken });
   clock.advance(0);
   await connecting;
 
@@ -91,12 +70,16 @@ test("an Auth token of the largest size that fits in the Handshake reaches the c
 });
 
 test("an accepting callback opens the Connection, which carries the data it returned", async () => {
-  const { clock, opened, connectFrom } = await setup(({ authToken }) => ({
-    accept: true,
-    data: { account: new TextDecoder().decode(authToken) },
-  }));
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: ({ authToken }) => ({
+      accept: true,
+      data: { account: new TextDecoder().decode(authToken) },
+    }),
+  });
 
-  const connecting = connectFrom(CLIENT, new TextEncoder().encode("ada"));
+  const connecting = connectFrom(CLIENT, {
+    authToken: new TextEncoder().encode("ada"),
+  });
   clock.advance(0);
   await connecting;
 
@@ -106,10 +89,9 @@ test("an accepting callback opens the Connection, which carries the data it retu
 });
 
 test("a denying callback opens no Connection, and the Client fails to connect with a denied reason carrying the developer's code", async () => {
-  const { clock, opened, connectFrom } = await setup(() => ({
-    accept: false,
-    code: 403,
-  }));
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: () => ({ accept: false, code: 403 }),
+  });
 
   const outcome = track(connectFrom(CLIENT));
   clock.advance(0);
@@ -134,7 +116,9 @@ function deferredCallback<Data>() {
 
 test("an asynchronous callback connects the Client once it accepts", async () => {
   const callback = deferredCallback<string>();
-  const { clock, opened, connectFrom } = await setup(callback.authenticate);
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
+  });
 
   const outcome = track(connectFrom(CLIENT));
   clock.advance(0);
@@ -156,7 +140,9 @@ test("an asynchronous callback connects the Client once it accepts", async () =>
 
 test("an asynchronous callback denies the Client once it answers", async () => {
   const callback = deferredCallback<undefined>();
-  const { clock, opened, connectFrom } = await setup(callback.authenticate);
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
+  });
 
   const outcome = track(connectFrom(CLIENT));
   clock.advance(0);
@@ -183,10 +169,10 @@ for (const [failing, fail] of [
 ] as const) {
   test(`a callback that ${failing} denies the Client and is reported, and the Server keeps accepting others`, async () => {
     const errors: unknown[] = [];
-    const { clock, server, opened, connectFrom } = await setup(
-      ({ authToken }) =>
+    const { clock, server, opened, connectFrom } = await setup({
+      authenticate: ({ authToken }) =>
         authToken.byteLength === 0 ? fail() : { accept: true },
-    );
+    });
     server.on("error", (error) => errors.push(error));
 
     const failed = track(connectFrom(CLIENT));
@@ -202,7 +188,7 @@ for (const [failing, fail] of [
 
     const other = connectFrom(
       { host: "10.0.0.3", port: 50000 },
-      Uint8Array.of(1),
+      { authToken: Uint8Array.of(1) },
     );
     clock.advance(0);
     await other;
@@ -214,10 +200,9 @@ for (const [failing, fail] of [
 
 test("a denial with a code out of range denies the Client with code 0 and is reported", async () => {
   const errors: unknown[] = [];
-  const { clock, server, connectFrom } = await setup(() => ({
-    accept: false,
-    code: 70_000,
-  }));
+  const { clock, server, connectFrom } = await setup({
+    authenticate: () => ({ accept: false, code: 70_000 }),
+  });
   server.on("error", (error) => errors.push(error));
 
   const outcome = track(connectFrom(CLIENT));
@@ -232,16 +217,11 @@ test("a denial with a code out of range denies the Client with code 0 and is rep
 
 test("a Client whose authentication never answers times out", async () => {
   const callback = deferredCallback<undefined>();
-  const { clock, network, opened } = await setup(callback.authenticate);
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
+  });
 
-  const outcome = track(
-    connect({
-      ...SERVER,
-      transport: network.bind(CLIENT),
-      clock,
-      timeout: 3000,
-    }),
-  );
+  const outcome = track(connectFrom(CLIENT, { timeout: 3000 }));
   clock.advance(2999);
   await settle();
   expect(outcome).toEqual({});
@@ -254,9 +234,9 @@ test("a Client whose authentication never answers times out", async () => {
 
 test("stopping the Server tells a Client still being authenticated that it was closed by the Server, and a later answer opens nothing", async () => {
   const callback = deferredCallback<undefined>();
-  const { clock, server, opened, connectFrom } = await setup(
-    callback.authenticate,
-  );
+  const { clock, server, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
+  });
   const outcome = track(connectFrom(CLIENT));
   clock.advance(0);
   await settle();
@@ -280,13 +260,13 @@ const clientAt = (index: number) => ({ host: `10.0.1.${index}`, port: 50000 });
 
 test("with the maximum number of Connections reached, a further Client fails with a Server full reason until one closes", async () => {
   const authenticated: Address[] = [];
-  const { clock, opened, connectFrom } = await setup(
-    ({ address }) => {
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: ({ address }) => {
       authenticated.push(address);
       return { accept: true };
     },
-    { maxConnections: 2 },
-  );
+    maxConnections: 2,
+  });
   const first = [connectFrom(clientAt(1)), connectFrom(clientAt(2))];
   clock.advance(0);
   await Promise.all(first);
@@ -313,7 +293,8 @@ test("with the maximum number of Connections reached, a further Client fails wit
 
 test("a Client still being authenticated holds a place under the maximum number of Connections", async () => {
   const callback = deferredCallback<undefined>();
-  const { clock, opened, connectFrom } = await setup(callback.authenticate, {
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
     maxConnections: 1,
   });
 
@@ -335,7 +316,8 @@ test("a Client still being authenticated holds a place under the maximum number 
 
 test("the Server stops waiting for an authentication that never answers after its timeout, freeing the place", async () => {
   const callback = deferredCallback<undefined>();
-  const { clock, opened, connectFrom } = await setup(callback.authenticate, {
+  const { clock, opened, connectFrom } = await setup({
+    authenticate: callback.authenticate,
     maxConnections: 1,
     timeout: 5000,
   });

@@ -7,12 +7,11 @@ import {
 } from "@ticknet/core";
 import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
 import { defineMessages, startServer } from "@ticknet/server";
+import { SERVER } from "./support";
 
 // A loopback socket never reports itself full, so these tests give the Server
 // the UDP Transport over a fake socket: it stands for the operating system,
 // carrying what it writes over a simulated network, and can run out of room.
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
 
 const messages = defineMessages({
   chat: {

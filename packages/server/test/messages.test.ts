@@ -1,14 +1,11 @@
 import { expect, test } from "bun:test";
-import { connect } from "@ticknet/client";
 import {
   MAX_DATAGRAM_MESSAGE_SIZE,
   type OutgoingDatagram,
   type Transport,
 } from "@ticknet/core";
-import { ManualClock, SimulatedNetwork } from "@ticknet/core/testing";
-import { defineMessages, startServer, type Connection } from "@ticknet/server";
-
-const SERVER = { host: "10.0.0.1", port: 4000 };
+import { defineMessages, type Connection } from "@ticknet/server";
+import { setup as setupServer } from "./support";
 
 const text = {
   encode: (value: string) => new TextEncoder().encode(value),
@@ -37,18 +34,20 @@ const messages = defineMessages({
   },
 });
 
-/** Wraps a Transport to record every batch of Datagrams sent through it. */
-function recorded(transport: Transport) {
+/** Records every batch of Datagrams sent through the Transports it wraps. */
+function recorder() {
   const batches: OutgoingDatagram[][] = [];
-  const recording: Transport = {
-    listen: (receiver) => transport.listen(receiver),
-    send: (datagrams) => {
-      batches.push([...datagrams]);
-      return transport.send(datagrams);
-    },
-    close: () => transport.close(),
+  return {
+    batches,
+    wrap: (transport: Transport): Transport => ({
+      listen: (receiver) => transport.listen(receiver),
+      send: (datagrams) => {
+        batches.push([...datagrams]);
+        return transport.send(datagrams);
+      },
+      close: () => transport.close(),
+    }),
   };
-  return { transport: recording, batches };
 }
 
 /**
@@ -56,41 +55,26 @@ function recorded(transport: Transport) {
  * it. Every Datagram either side sends is recorded.
  */
 async function setup(options: { tickRate?: number; sendRate?: number } = {}) {
-  const clock = new ManualClock();
-  const network = new SimulatedNetwork({ clock });
-  const serverSide = recorded(network.bind(SERVER));
-  const server = await startServer({
-    transport: serverSide.transport,
-    clock,
+  const serverSide = recorder();
+  const tested = await setupServer({
     tickRate: options.tickRate,
+    wrapServer: serverSide.wrap,
   });
-  const opened: Connection[] = [];
-  server.on("connectionOpened", (connection) => opened.push(connection));
-  let nextPort = 50000;
 
   /** Connects a Client without moving the Clock past the Handshake. */
   async function connectClient() {
-    const clientSide = recorded(
-      network.bind({ host: "10.0.0.2", port: nextPort++ }),
-    );
-    const connecting = connect({
-      ...SERVER,
-      transport: clientSide.transport,
-      clock,
+    const clientSide = recorder();
+    const { client, connection } = await tested.connectClient(undefined, {
       sendRate: options.sendRate,
+      wrap: clientSide.wrap,
     });
-    clock.advance(0);
-    const client = await connecting;
-    const connection = opened.at(-1);
-    if (!connection)
-      throw new Error("Expected the Server to open a Connection");
     // Only what is sent once connected matters to these tests.
     clientSide.batches.length = 0;
     serverSide.batches.length = 0;
     return { client, connection, sent: clientSide.batches };
   }
 
-  return { clock, server, sent: serverSide.batches, connectClient };
+  return { ...tested, sent: serverSide.batches, connectClient };
 }
 
 const datagramCount = (batches: OutgoingDatagram[][]) =>
