@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] A Message is defined from a numeric id and a codec; sending and handling it are type-checked against that definition
 - [x] Defining two Messages with the same id fails with a clear error

@@ -4,7 +4,7 @@
 
 **Blocked by:** 02
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The Client's Auth token reaches the Server's authentication callback unchanged, as opaque bytes, together with the Client's address
 - [x] The callback is never called for an address that has not completed the challenge

@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The simulated network accepts a loss rate, a latency, a jitter, a reordering rate and a duplication rate, and a seed
 - [x] Two runs with the same seed and the same test produce the same sequence of deliveries; a different seed produces a different one

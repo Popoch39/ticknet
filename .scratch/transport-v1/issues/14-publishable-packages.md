@@ -4,7 +4,7 @@
 
 **Blocked by:** 05, 11, 12, 13
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] One command builds each package to JavaScript with `bun build` and emits its type declarations with `tsc`
 - [x] Each package declares its entry points and types so that a consumer imports the built output, and core exposes its testing entry point separately

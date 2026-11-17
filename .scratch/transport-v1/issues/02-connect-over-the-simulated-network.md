@@ -4,7 +4,7 @@
 
 **Blocked by:** 01
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Through the public API, with Transport and Clock injected, a Client connects to a Server: the Server raises a Connection opened event and the Client's connect resolves
 - [x] Several Clients can connect to the same Server and each gets its own Connection

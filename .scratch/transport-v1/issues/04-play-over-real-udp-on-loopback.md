@@ -4,7 +4,7 @@
 
 **Blocked by:** 03
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] With default options, a Server listens on a UDP port and a Client connects to it on loopback
 - [x] An Unreliable Message crosses real sockets in each direction and reaches its typed handler

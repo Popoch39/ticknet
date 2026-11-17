@@ -4,7 +4,7 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] A Reliable Message many times larger than a Datagram is delivered intact, in both directions
 - [x] Under seeded loss, reordering and duplication, a large Reliable Message is still delivered intact, exactly once

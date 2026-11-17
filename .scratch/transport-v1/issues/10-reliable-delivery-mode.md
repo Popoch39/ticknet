@@ -4,7 +4,7 @@
 
 **Blocked by:** 04, 09
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Reliable is selectable as the Delivery mode of a send, in both directions
 - [x] Under seeded loss, reordering and duplication together, every Reliable Message sent is delivered exactly once and in send order

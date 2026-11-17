@@ -1,6 +1,6 @@
 # ticknet transport v1
 
-Status: ready-for-agent
+Status: resolved
 
 ## Problem Statement
 
@@ -138,7 +138,7 @@ v1 covers Bun-to-Bun only. It does not replicate game state, does not encrypt, a
 ### Tooling and release
 
 - TypeScript in strict mode. Quality gate: `bun check`, `bun test`, `bun lint`, `bun fmt`.
-- Published artifacts: JavaScript built by `bun build`, declarations emitted by `tsc`. `typescript` is the only development dependency.
+- Published artifacts: JavaScript built by `bun build`, declarations emitted by `tsc`. `typescript` and `@types/bun` are the only development dependencies: Bun 1.4.4's `bun check` does not ship Bun's type definitions, so tests and the server and client packages need `@types/bun` to type-check.
 - License: MIT.
 
 ### Demo

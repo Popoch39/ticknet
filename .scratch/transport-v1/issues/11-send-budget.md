@@ -4,7 +4,7 @@
 
 **Blocked by:** 10
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The Send budget is configurable on the Server per Connection and on the Client, with a sensible default
 - [x] In no Tick does a Connection put more bytes on the network than its Send budget, counting resends and acknowledgements

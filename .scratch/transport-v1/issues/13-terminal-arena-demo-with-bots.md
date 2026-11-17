@@ -4,7 +4,7 @@
 
 **Blocked by:** 06, 08, 10
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] One command starts the arena Server; one command starts a Client that joins it over real UDP
 - [x] A player moves a character with the keyboard and sees the other characters move in their terminal

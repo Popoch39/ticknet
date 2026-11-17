@@ -4,7 +4,7 @@
 
 **Blocked by:** 03, 04
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] A Client that disconnects on purpose causes a Connection closed event on the Server with a closed-by-Client reason, without waiting for the timeout
 - [x] The Server closes a Connection with a developer-chosen code, and the Client is told it was closed by the Server with that code

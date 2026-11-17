@@ -4,7 +4,7 @@
 
 **Blocked by:** 04, 07
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] Sequenced is selectable as the Delivery mode of a send, in both directions
 - [x] With reordering enabled, the values delivered for one Message type are always in increasing send order; older ones arriving late are dropped

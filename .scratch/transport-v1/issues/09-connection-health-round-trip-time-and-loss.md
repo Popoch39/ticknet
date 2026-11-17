@@ -4,7 +4,7 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The Server exposes a round-trip time and a loss rate per Connection; the Client exposes the same for its link to the Server
 - [x] On a simulated link with a fixed latency and no loss, the round-trip time converges close to twice that latency

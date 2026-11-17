@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
 - [x] The directory is a git repository, with dependencies and build output ignored
 - [x] A Bun workspace holds three packages under one npm scope: core, server, client, all at the same version
