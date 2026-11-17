@@ -66,6 +66,10 @@ _Avoid_: Guaranteed, ordered, TCP-like
 One step of the fixed-rate loop the library runs, numbered from the start; everything sent during a Tick leaves together.
 _Avoid_: Frame, step, update
 
+**Send step**:
+One beat of a Client's send rate, at which everything the Client sent since the previous one leaves together; the Client's counterpart of the Server's Tick.
+_Avoid_: Client tick, flush
+
 **Send budget**:
-The amount of data a Connection may send during one Tick.
+The amount of data a Connection may send during one Tick, or one Send step on the Client's side.
 _Avoid_: Bandwidth, rate limit, quota

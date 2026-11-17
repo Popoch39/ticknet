@@ -41,7 +41,7 @@ const STEP = 50;
 /**
  * A Server at 20 Ticks per second and one Client sending at 20 Hz, connected
  * over a simulated network with the given conditions, so that each Tick or
- * send step puts one Datagram on the network. Datagrams leave every STEP
+ * Send step puts one Datagram on the network. Datagrams leave every STEP
  * milliseconds, less than the 100 ms the simulated network holds one back
  * for, so that reordering does reorder.
  */

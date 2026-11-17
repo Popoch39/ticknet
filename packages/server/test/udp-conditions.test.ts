@@ -126,7 +126,7 @@ test("a Client's own UDP socket can be wrapped in network conditions on the Clie
   const roundTrip = performance.now() - start;
 
   expect(atClient.values).toEqual([7]);
-  // Without the latency, waiting for the next send step and Tick takes at most two 33 ms steps.
+  // Without the latency, waiting for the next Send step and Tick takes at most two 33 ms steps.
   expect(roundTrip).toBeGreaterThanOrEqual(200);
   client.close();
   server.stop();

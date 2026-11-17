@@ -65,7 +65,7 @@ function cuttable(transport: Transport) {
 /**
  * A Server at 20 Ticks per second and one Client sending at 20 Hz, connected
  * over a simulated network with the given conditions, so that each Tick or
- * send step puts one Datagram on the network, closer together than the
+ * Send step puts one Datagram on the network, closer together than the
  * 100 ms the simulated network holds one back for. Either endpoint's link
  * can be cut.
  */

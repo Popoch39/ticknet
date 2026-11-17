@@ -44,7 +44,7 @@ export interface ClientEngineConfig {
   readonly sendRate: number;
   /** Opaque bytes for the Server's authentication callback; at most MAX_AUTH_TOKEN_SIZE. */
   readonly authToken?: Uint8Array;
-  /** The most bytes the Client puts on the network per send step; DEFAULT_SEND_BUDGET by default. */
+  /** The most bytes the Client puts on the network per Send step; DEFAULT_SEND_BUDGET by default. */
   readonly sendBudget?: number;
 }
 
@@ -115,7 +115,7 @@ export class ClientEngine implements Engine<ClientEvent> {
   }
 
   /**
-   * Queues a Message until the next send step; throws if it can never be
+   * Queues a Message until the next Send step; throws if it can never be
    * sent. Returns false, queuing nothing, for an Unreliable or Sequenced
    * Message refused by the Send budget.
    */

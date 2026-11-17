@@ -43,7 +43,7 @@ export function keepaliveInterval(
 
 /**
  * The Send budget of a Connection when the game sets none, in bytes per Tick
- * (per send step on the Client): four full Datagrams, about 1.2 Mbit/s at
+ * (per Send step on the Client): four full Datagrams, about 1.2 Mbit/s at
  * 30 Ticks per second.
  */
 export const DEFAULT_SEND_BUDGET = 4 * MAX_DATAGRAM_SIZE;

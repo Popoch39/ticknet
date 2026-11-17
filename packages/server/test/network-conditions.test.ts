@@ -27,7 +27,7 @@ const messages = defineMessages({
 /**
  * A Server at 10 Ticks per second on a simulated network with the given
  * conditions, and a way to connect Clients sending at 10 Hz too, so that each
- * Tick or send step puts one Datagram on the network.
+ * Tick or Send step puts one Datagram on the network.
  */
 async function setup(
   options: {
@@ -89,7 +89,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 const range = (count: number) => Array.from({ length: count }, (_, i) => i);
 
 /**
- * Sends `count` numbered Messages each way, one per Tick and send step, then
+ * Sends `count` numbered Messages each way, one per Tick and Send step, then
  * waits long enough for any of them to arrive. Returns what each side got.
  */
 async function exchange(

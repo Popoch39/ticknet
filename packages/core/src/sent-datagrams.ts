@@ -44,7 +44,7 @@ export class SentDatagrams {
   readonly #sequences = new Float64Array(TRACKED_DATAGRAMS).fill(-1);
   readonly #sentAt = new Float64Array(TRACKED_DATAGRAMS);
   readonly #states = new Uint8Array(TRACKED_DATAGRAMS);
-  /** 1 for a Datagram carrying Messages, which the other side acknowledges at its next Tick or send step. */
+  /** 1 for a Datagram carrying Messages, which the other side acknowledges at its next Tick or Send step. */
   readonly #carriesMessages = new Uint8Array(TRACKED_DATAGRAMS);
   #acknowledged = 0;
   #missed = 0;

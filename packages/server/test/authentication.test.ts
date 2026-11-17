@@ -93,7 +93,7 @@ test("an Auth token of the largest size that fits in the Handshake reaches the c
 test("an accepting callback opens the Connection, which carries the data it returned", async () => {
   const { clock, opened, connectFrom } = await setup(({ authToken }) => ({
     accept: true,
-    data: { player: new TextDecoder().decode(authToken) },
+    data: { account: new TextDecoder().decode(authToken) },
   }));
 
   const connecting = connectFrom(CLIENT, new TextEncoder().encode("ada"));
@@ -101,7 +101,7 @@ test("an accepting callback opens the Connection, which carries the data it retu
   await connecting;
 
   expect(opened).toHaveLength(1);
-  expect(opened[0]?.data).toEqual({ player: "ada" });
+  expect(opened[0]?.data).toEqual({ account: "ada" });
   expect(opened[0]?.address).toEqual(CLIENT);
 });
 

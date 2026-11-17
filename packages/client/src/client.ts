@@ -43,7 +43,7 @@ export interface ClientOptions {
    */
   readonly authToken?: Uint8Array;
   /**
-   * The most bytes the Client puts on the network per send step, resends and
+   * The most bytes the Client puts on the network per Send step, resends and
    * acknowledgements included; DEFAULT_SEND_BUDGET by default. What is left
    * unused in one step is not carried over.
    */
@@ -207,7 +207,7 @@ export class Client {
    * waiting, the Connection closes.
    *
    * Returns false, sending nothing, when an Unreliable or Sequenced Message
-   * does not fit in what is left of this send step's Send budget. A Reliable
+   * does not fit in what is left of this Send step's Send budget. A Reliable
    * Message is never refused: what does not fit waits for later steps.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): boolean {
