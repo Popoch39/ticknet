@@ -100,6 +100,8 @@ export class ConditionedLink<Item extends { readonly data: Uint8Array }> {
   /** At most one Datagram held back per path, waiting to be overtaken. */
   readonly #held = new Map<string, Held<Item>>();
   readonly #pending = new Set<() => void>();
+  /** Called once nothing is on its way any more, after `drain`. */
+  #drained: (() => void) | undefined;
 
   constructor(
     conditions: NetworkConditions,
@@ -133,6 +135,12 @@ export class ConditionedLink<Item extends { readonly data: Uint8Array }> {
     this.#held.clear();
   }
 
+  /** Calls `then` once every Datagram on its way has arrived; at once if none is. */
+  drain(then: () => void): void {
+    if (this.#pending.size === 0) then();
+    else this.#drained = then;
+  }
+
   #travel(path: string, item: Item): void {
     const at =
       this.#clock.now() + this.#latency + this.#random.next() * this.#jitter;
@@ -162,6 +170,11 @@ export class ConditionedLink<Item extends { readonly data: Uint8Array }> {
       this.#pending.delete(cancel);
       before?.();
       this.#arrive(item);
+      if (this.#pending.size === 0) {
+        const drained = this.#drained;
+        this.#drained = undefined;
+        drained?.();
+      }
     });
     this.#pending.add(cancel);
     return cancel;

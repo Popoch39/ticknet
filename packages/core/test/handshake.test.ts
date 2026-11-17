@@ -206,6 +206,23 @@ test("an echo replayed while the Client is being authenticated asks for authenti
   ]);
 });
 
+test("an echo arriving after its Client was denied does not ask for authentication again, and the refusal is sent again", () => {
+  const server = newServer();
+  const echo = onlyDatagram(clientReadyToEcho(server));
+  server.receive(echo, CLIENT, 0);
+  const [request] = server.pollEvents();
+  if (request?.type !== "authenticationRequested")
+    throw new Error("Expected an authentication request");
+  server.deny(request.connection, 7, 0);
+  const refusal = onlyDatagram(server);
+
+  // A copy of the echo was still on its way, or the refusal was lost and the Client resent it.
+  server.receive(echo, CLIENT, 100);
+
+  expect(server.pollEvents()).toEqual([]);
+  expect(server.pollDatagrams()).toEqual([{ to: CLIENT, data: refusal }]);
+});
+
 test("an echo resent after the Server gave up waiting for its authentication does not ask again", () => {
   const server = new ServerEngine(
     { secret: SECRET, tickRate: 30, maxConnections: 64, timeout: 3000 },

@@ -145,9 +145,10 @@ export interface ServerEvents<Data = undefined> {
   /** Runs once per Tick, before everything sent during the Tick leaves. */
   tick: (tick: number) => void;
   /**
-   * A received Message could not be decoded, its handler threw, or the
-   * authentication callback failed; the Server carries on. Without a
-   * listener, the error is written to the console.
+   * A received Message could not be decoded, its handler threw, the
+   * authentication callback failed, or a listener of another event threw;
+   * the Server carries on. Without a listener, the error is written to the
+   * console.
    */
   error: (error: Error) => void;
 }
@@ -215,7 +216,7 @@ export class Server<Data = undefined> {
           const connection = this.#connections.get(event.connection);
           if (!connection) break;
           for (const listener of this.#listeners.connectionOpened)
-            listener(connection);
+            this.#contain("connectionOpened", () => listener(connection));
           break;
         }
         case "connectionClosed": {
@@ -223,11 +224,14 @@ export class Server<Data = undefined> {
           if (!connection) break;
           this.#connections.delete(event.connection);
           for (const listener of this.#listeners.connectionClosed)
-            listener(connection, event.reason);
+            this.#contain("connectionClosed", () =>
+              listener(connection, event.reason),
+            );
           break;
         }
         case "tick":
-          for (const listener of this.#listeners.tick) listener(event.tick);
+          for (const listener of this.#listeners.tick)
+            this.#contain("tick", () => listener(event.tick));
           break;
         case "message": {
           const connection = this.#connections.get(event.connection);
@@ -272,14 +276,17 @@ export class Server<Data = undefined> {
 
   /**
    * Closes every Connection, telling each Client it was closed by the Server
-   * (with code 0), then stops ticking and releases the socket and timers, so
-   * that the process can exit and the port can be reused.
+   * with `code`, an integer from 0 to MAX_CLOSE_CODE (0 by default), and
+   * tells the same to every Client still being authenticated, whose callback
+   * answer is then ignored. Then stops ticking and releases the socket and
+   * timers, so that the process can exit and the port can be reused.
+   *
+   * Pick a code that no `Connection.close` call of the game uses, so that
+   * Clients can tell a shutdown from being closed one by one. Throws a
+   * RangeError, stopping nothing, for a code out of range.
    */
-  stop(): void {
-    this.#driver.perform(() => {
-      for (const connection of this.#connections.keys())
-        this.#engine.close(connection, 0);
-    });
+  stop(code = 0): void {
+    this.#driver.perform(() => this.#engine.stop(code));
     this.#driver.stop();
   }
 
@@ -330,7 +337,7 @@ export class Server<Data = undefined> {
       return;
     }
     try {
-      this.#engine.deny(connection, decision.code);
+      this.#engine.deny(connection, decision.code, this.#clock.now());
     } catch (error) {
       this.#refuseAfter(error, connection);
     }
@@ -338,13 +345,28 @@ export class Server<Data = undefined> {
 
   /** A failing callback must neither stop the Server nor let the Client in. */
   #refuseAfter(error: unknown, connection: ConnectionId): void {
-    this.#engine.deny(connection, 0);
+    this.#engine.deny(connection, 0, this.#clock.now());
     // The game may throw anything; listeners always get an Error.
     this.#report(
       error instanceof Error
         ? error
         : new Error("The authentication callback failed", { cause: error }),
     );
+  }
+
+  /**
+   * Runs one of the game's listeners. One that throws is reported instead,
+   * as it would otherwise stop the listeners after it and the Server's Ticks.
+   */
+  #contain(
+    event: Exclude<keyof ServerEvents, "error">,
+    call: () => void,
+  ): void {
+    try {
+      call();
+    } catch (cause) {
+      this.#report(new Error(`A "${event}" listener threw`, { cause }));
+    }
   }
 
   #report(error: Error): void {

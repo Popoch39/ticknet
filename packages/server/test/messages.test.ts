@@ -366,6 +366,29 @@ test("a Message handler that throws is reported, and the Messages after it are s
   ]);
 });
 
+test("a Tick callback that throws is reported, and the other callbacks, the Tick's Messages and the Ticks after it carry on", async () => {
+  const { clock, server, connectClient } = await setup({ tickRate: 10 });
+  const { client, connection } = await connectClient();
+  const received: string[] = [];
+  client.onMessage(messages.chat, (value) => received.push(value));
+  const ticks: number[] = [];
+  const errors: Error[] = [];
+  server.on("tick", (tick) => {
+    connection.send(messages.chat, `tick ${tick}`, "unreliable");
+    if (tick === 2) throw new Error("Game bug");
+  });
+  server.on("tick", (tick) => ticks.push(tick));
+  server.on("error", (error) => errors.push(error));
+
+  clock.advance(450);
+
+  expect(ticks).toEqual([1, 2, 3, 4]);
+  expect(received).toEqual(["tick 1", "tick 2", "tick 3", "tick 4"]);
+  expect(errors.map((error) => [error.message, error.cause])).toEqual([
+    ['A "tick" listener threw', new Error("Game bug")],
+  ]);
+});
+
 test("a decode function that throws on the Client is reported to the Client's error listeners", async () => {
   const { clock, connectClient } = await setup();
   const { client, connection } = await connectClient();

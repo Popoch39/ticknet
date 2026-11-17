@@ -66,7 +66,12 @@ export class ClientEngine implements Engine<ClientEvent> {
   /** The Handshake Datagram of the current step, sent again until the Server answers it. */
   #handshakeDatagram: Uint8Array;
   #handshakeResendAt: number;
-  readonly #link: Link;
+  readonly #sendBudget: number;
+  /**
+   * Made again on acceptance, once the Server's timeout is known, so that its
+   * keepalives fit in it; nothing is sent on the first one.
+   */
+  #link: Link;
   readonly #sequenced = new SequencedOrder();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
@@ -90,7 +95,8 @@ export class ClientEngine implements Engine<ClientEvent> {
     this.#authToken = authToken.slice();
     this.#server = config.server;
     this.#timeout = config.timeout;
-    this.#link = new Link(keepaliveInterval(config.timeout), now, sendBudget);
+    this.#sendBudget = sendBudget;
+    this.#link = this.#newLink(config.timeout, now);
     this.#handshakeDeadline = now + config.timeout;
     this.#sendSteps = new Cadence(now, config.sendRate, "send rate");
     this.#handshakeDatagram = encodeDatagram({ kind: "connectRequest" });
@@ -149,6 +155,7 @@ export class ClientEngine implements Engine<ClientEvent> {
           encodeDatagram({
             kind: "challengeResponse",
             challenge: datagram.challenge,
+            timeout: this.#timeout,
             authToken: this.#authToken,
           }),
           now,
@@ -157,6 +164,7 @@ export class ClientEngine implements Engine<ClientEvent> {
       case "accepted":
         if (this.#state !== "echoing") break;
         this.#state = "connected";
+        this.#link = this.#newLink(datagram.timeout, now);
         this.#silenceDeadline = now + this.#timeout;
         this.#sendSteps.skipPast(now);
         this.#events.push({ type: "connectionOpened" });
@@ -234,6 +242,14 @@ export class ClientEngine implements Engine<ClientEvent> {
     const events = this.#events;
     this.#events = [];
     return events;
+  }
+
+  #newLink(serverTimeout: number, now: number): Link {
+    return new Link(
+      keepaliveInterval(this.#timeout, serverTimeout),
+      now,
+      this.#sendBudget,
+    );
   }
 
   /** Sends a Handshake Datagram now, and again at every resend interval until the next step of the Handshake. */

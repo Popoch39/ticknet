@@ -29,12 +29,16 @@ export function assertSendable(
 
 /**
  * How long an endpoint with nothing to send on a Connection waits before
- * sending a keepalive, given its own `timeout`: four fit in it, and never
- * more than a second passes, so that a peer with a shorter timeout still
- * hears from it in time.
+ * sending a keepalive, given its own timeout and the one the other side told
+ * it during the Handshake: four fit in the shorter, so that neither side's
+ * timeout runs out on an idle Connection, and never more than a second
+ * passes, so that the round-trip time and loss rate stay fresh.
  */
-export function keepaliveInterval(timeout: number): number {
-  return Math.min(1000, timeout / 4);
+export function keepaliveInterval(
+  ownTimeout: number,
+  otherTimeout: number,
+): number {
+  return Math.min(1000, Math.min(ownTimeout, otherTimeout) / 4);
 }
 
 /**

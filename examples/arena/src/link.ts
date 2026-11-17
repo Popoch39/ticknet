@@ -78,28 +78,13 @@ export function connectOptions(
   return {
     host,
     port,
-    wrapTransport: (transport, clock) => {
-      const conditioned = withNetworkConditions(transport, {
+    wrapTransport: (transport, clock) =>
+      withNetworkConditions(transport, {
         clock,
         seed: settings.seed + offset,
         send: conditions,
         receive: conditions,
-      });
-      return {
-        listen: (receiver) => conditioned.listen(receiver),
-        send: (datagrams) => conditioned.send(datagrams),
-        // The wrapper drops what is still delayed when it closes, the close
-        // notice of a quitting Client included, which the Server would then
-        // only notice at its timeout. Closing once that has left keeps
-        // "quit" instant on a slow link too.
-        close: () => {
-          clock.schedule(
-            clock.now() + settings.latency + settings.jitter + 1,
-            () => conditioned.close(),
-          );
-        },
-      };
-    },
+      }),
   };
 }
 

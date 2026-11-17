@@ -6,6 +6,7 @@ import {
   decodeDatagram,
   encodeDatagram,
   type CloseNoticeReason,
+  type Datagram,
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
@@ -68,6 +69,9 @@ export interface ServerEngineConfig {
   readonly sendBudget?: number;
 }
 
+/** A Client's echo of its challenge. */
+type Echo = Extract<Datagram, { kind: "challengeResponse" }>;
+
 interface OpenConnection {
   readonly id: ConnectionId;
   readonly address: Address;
@@ -100,10 +104,26 @@ export class ServerEngine implements Engine<ServerEvent> {
     {
       readonly address: Address;
       readonly challenge: Uint8Array;
+      /** The timeout the Client told in its echo. */
+      readonly clientTimeout: number;
       readonly deadline: number;
     }
   >();
   readonly #authenticatingAddresses = new Set<string>();
+  /**
+   * The Clients denied while their echo can still arrive, by address, so that
+   * a late copy of it gets the refusal again instead of asking the game a
+   * second time. Every denial is kept as long, so the map stays ordered by
+   * expiry. Only proven addresses get here.
+   */
+  readonly #denials = new Map<
+    string,
+    {
+      readonly challenge: Uint8Array;
+      readonly refusal: Uint8Array;
+      readonly until: number;
+    }
+  >();
   readonly #byAddress = new Map<string, OpenConnection>();
   readonly #byId = new Map<ConnectionId, OpenConnection>();
   /**
@@ -205,7 +225,7 @@ export class ServerEngine implements Engine<ServerEvent> {
         break;
       case "challengeResponse":
         if (this.#challenger.verify(datagram.challenge, from, now))
-          this.#authenticate(from, datagram.challenge, datagram.authToken, now);
+          this.#authenticate(from, datagram, now);
         break;
       case "connected": {
         const open = this.#byAddress.get(addressKey(from));
@@ -239,20 +259,24 @@ export class ServerEngine implements Engine<ServerEvent> {
   accept(connection: ConnectionId, now: number): boolean {
     const pending = this.#authenticating.get(connection);
     if (!pending) return false;
-    const { address, challenge } = pending;
+    const { address, challenge, clientTimeout } = pending;
     this.#forgetAuthentication(connection, address);
     const open = {
       id: connection,
       address,
       challenge,
-      link: new Link(keepaliveInterval(this.#timeout), now, this.#sendBudget),
+      link: new Link(
+        keepaliveInterval(this.#timeout, clientTimeout),
+        now,
+        this.#sendBudget,
+      ),
       sequenced: new SequencedOrder(),
     };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);
     this.#heardFrom(connection, now);
     this.#events.push({ type: "connectionOpened", connection, address });
-    this.#send(address, encodeDatagram({ kind: "accepted" }));
+    this.#send(address, this.#acceptance());
     return true;
   }
 
@@ -269,19 +293,46 @@ export class ServerEngine implements Engine<ServerEvent> {
   }
 
   /**
-   * Refuses the Client whose authentication was requested, telling it `code`;
-   * does nothing if it is no longer pending. Throws a RangeError if `code` is
-   * not an integer from 0 to MAX_CLOSE_CODE.
+   * Closes every open Connection and tells every Client still being
+   * authenticated that it was closed by the Server with `code`, so that none
+   * of them waits for its timeout; a later decision on those is ignored.
+   * Throws a RangeError, closing nothing, if `code` is not an integer from 0
+   * to MAX_CLOSE_CODE.
    */
-  deny(connection: ConnectionId, code: number): void {
+  stop(code: number): void {
+    assertCloseCode(code, "close");
+    const reason = { kind: "closedByServer", code } as const;
+    for (const open of this.#byId.values()) this.#closeOpen(open, reason);
+    for (const [connection, { address }] of this.#authenticating) {
+      this.#forgetAuthentication(connection, address);
+      this.#send(address, encodeDatagram({ kind: "close", reason }));
+    }
+  }
+
+  /**
+   * Refuses the Client whose authentication was requested, at time `now`,
+   * telling it `code`; does nothing if it is no longer pending. Throws a
+   * RangeError if `code` is not an integer from 0 to MAX_CLOSE_CODE.
+   */
+  deny(connection: ConnectionId, code: number, now: number): void {
     assertCloseCode(code, "denial");
-    const address = this.#authenticating.get(connection)?.address;
-    if (!address) return;
+    const pending = this.#authenticating.get(connection);
+    if (!pending) return;
+    const { address, challenge } = pending;
     this.#forgetAuthentication(connection, address);
-    this.#send(
-      address,
-      encodeDatagram({ kind: "refused", reason: { kind: "denied", code } }),
-    );
+    const refusal = encodeDatagram({
+      kind: "refused",
+      reason: { kind: "denied", code },
+    });
+    const key = addressKey(address);
+    this.#denials.delete(key);
+    // An echo is valid for less than `timeout` after its challenge was issued, so none comes after that.
+    this.#denials.set(key, {
+      challenge,
+      refusal,
+      until: now + this.#timeout,
+    });
+    this.#send(address, refusal);
   }
 
   advance(now: number): void {
@@ -289,6 +340,10 @@ export class ServerEngine implements Engine<ServerEvent> {
       if (deadline > now) break;
       // The Client has given up by now, or soon will: it times out on its own.
       this.#forgetAuthentication(connection, address);
+    }
+    for (const [key, { until }] of this.#denials) {
+      if (until > now) break;
+      this.#denials.delete(key);
     }
     for (const [connection, deadline] of this.#silenceDeadlines) {
       if (deadline > now) break;
@@ -369,16 +424,25 @@ export class ServerEngine implements Engine<ServerEvent> {
 
   #authenticate(
     from: Address,
-    challenge: Uint8Array,
-    authToken: Uint8Array,
+    { challenge, timeout, authToken }: Echo,
     now: number,
   ): void {
     const key = addressKey(from);
+    const denial = this.#denials.get(key);
+    if (denial) {
+      // The game already said no to this echo; the refusal may have been lost.
+      if (sameChallenge(challenge, denial.challenge)) {
+        this.#send(from, denial.refusal);
+        return;
+      }
+      // A new attempt, which the game decides on anew.
+      this.#denials.delete(key);
+    }
     const open = this.#byAddress.get(key);
     if (open) {
       // A repeated echo means the acceptance was lost: answer again, without a second Connection.
       if (sameChallenge(challenge, open.challenge)) {
-        this.#send(from, encodeDatagram({ kind: "accepted" }));
+        this.#send(from, this.#acceptance());
         return;
       }
       // The Client started over, so it left the old Connection, whose close notice was lost.
@@ -400,6 +464,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     this.#authenticating.set(connection, {
       address: from,
       challenge,
+      clientTimeout: timeout,
       deadline: now + this.#timeout,
     });
     this.#authenticatingAddresses.add(key);
@@ -417,6 +482,11 @@ export class ServerEngine implements Engine<ServerEvent> {
    */
   #answerUnproven(to: Address, answer: Uint8Array, trigger: Uint8Array): void {
     if (answer.byteLength <= trigger.byteLength) this.#send(to, answer);
+  }
+
+  /** The acceptance, which tells the Client the Server's timeout so that it keeps the Connection alive within it. */
+  #acceptance(): Uint8Array {
+    return encodeDatagram({ kind: "accepted", timeout: this.#timeout });
   }
 
   #send(to: Address, data: Uint8Array): void {

@@ -14,9 +14,11 @@ export interface DatagramSocket {
   /**
    * Sends flat `data, port, address` triples, the address being an IP
    * literal, and returns how many Datagrams were written: a prefix of the
-   * batch, cut at the first one the socket had no room for.
+   * batch, cut at the first one the socket had no room for. May throw a
+   * system error, with a `code`, writing nothing: Bun's does once a Datagram
+   * it sent bounced off a closed port.
    */
-  sendMany(packets: readonly (Uint8Array | number | string)[]): number;
+  sendMany(datagrams: readonly (Uint8Array | number | string)[]): number;
   close(): void;
 }
 
@@ -44,9 +46,16 @@ export class SocketTransport implements Transport {
 
   send(datagrams: readonly OutgoingDatagram[]): number {
     if (this.#full || datagrams.length === 0) return 0;
-    const written = this.#socket.sendMany(
-      datagrams.flatMap(({ to, data }) => [data, to.port, to.host]),
-    );
+    let written: number;
+    try {
+      written = this.#socket.sendMany(
+        datagrams.flatMap(({ to, data }) => [data, to.port, to.host]),
+      );
+    } catch (error) {
+      // The network refused the batch: lost, as it could be on the way, which the protocol copes with.
+      if (isSystemError(error)) return 0;
+      throw error;
+    }
     if (written < datagrams.length) this.#full = true;
     return written;
   }
@@ -63,4 +72,11 @@ export class SocketTransport implements Transport {
     this.#receiver = undefined;
     this.#socket.close();
   }
+}
+
+/** Whether `error` comes from the operating system, which names it by a code such as ECONNREFUSED. */
+function isSystemError(error: unknown): boolean {
+  return (
+    error instanceof Error && "code" in error && typeof error.code === "string"
+  );
 }

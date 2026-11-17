@@ -219,7 +219,7 @@ function wrapped(conditions: Omit<ConditionedTransportOptions, "clock">) {
   const other = network.bind(RECEIVER);
   const atSender = deliveries(sender, clock);
   const atOther = deliveries(other, clock);
-  return { clock, sender, other, atSender, atOther };
+  return { clock, network, sender, other, atSender, atOther };
 }
 
 test("a wrapped Transport applies its send conditions to what it sends and its receive conditions to what it receives", () => {
@@ -269,22 +269,27 @@ test("a wrapped Transport replays the same deliveries from the same seed", () =>
   expect(replay(8)).not.toEqual(replay(7));
 });
 
-test("closing a wrapped Transport closes the one inside and drops what its conditions still hold", () => {
-  const { clock, sender, other, atSender, atOther } = wrapped({
-    send: { latency: 50 },
+test("closing a wrapped Transport still sends what its conditions delay, as a closing socket would have, then closes the one inside", () => {
+  const { clock, network, sender, other, atSender, atOther } = wrapped({
+    send: { latency: 50, jitter: 30, reordering: 0.5 },
     receive: { latency: 50 },
   });
 
-  sender.send([{ to: RECEIVER, data: bytes(1) }]);
-  other.send([{ to: SENDER, data: bytes(2) }]);
+  sender.send([
+    { to: RECEIVER, data: bytes(1) },
+    { to: RECEIVER, data: bytes(2) },
+  ]);
+  other.send([{ to: SENDER, data: bytes(3) }]);
   clock.advance(10);
   sender.close();
-  clock.advance(100);
-  other.send([{ to: SENDER, data: bytes(3) }]);
-  clock.advance(100);
+  sender.send([{ to: RECEIVER, data: bytes(4) }]);
+  // The Transport inside stays bound to its address until the delayed Datagrams have left.
+  expect(() => network.bind(SENDER)).toThrow();
+  clock.advance(500);
 
-  expect(atOther).toEqual([]);
+  expect(atOther.map(({ value }) => value).sort()).toEqual([1, 2]);
   expect(atSender).toEqual([]);
+  expect(() => network.bind(SENDER)).not.toThrow();
 });
 
 test("a loss rate of 1 drops everything, and of 0 nothing", () => {

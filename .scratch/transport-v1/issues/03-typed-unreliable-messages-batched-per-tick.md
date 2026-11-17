@@ -57,6 +57,6 @@ Tests: seam 1 in `packages/server/test/messages.test.ts` (a `recorded` Transport
 
 - A Client's handlers can only be registered after `connect` resolves. With the manual Clock, a single `clock.advance` that covers both the Handshake and a Server Tick delivers that Tick's Messages before the `await` resumes, and they are dropped for lack of a handler: tests connect with `clock.advance(0)` and `await` before advancing further. Reliable delivery (ticket 10) will need an answer for Messages that arrive before a handler exists.
 - Under reordering (ticket 07), a connected Datagram can reach the Client before `accepted`; it is ignored for now. Treating it as an implicit acceptance would be cheap.
-- A Tick callback (or `connectionOpened` listener) that throws escapes `EngineDriver.#pump`, which then never re-arms its wake-up: the Server stops ticking. Only Message handlers are contained so far.
+- A Tick callback (or `connectionOpened` listener) that throws escapes `EngineDriver.#pump`, which then never re-arms its wake-up: the Server stops ticking. Only Message handlers are contained so far. (Review fix: the Server now contains every `tick`, `connectionOpened` and `connectionClosed` listener and reports a throw on `error` as `A "<event>" listener threw`, with the original as `cause`.)
 - `Connection.send` on a Connection the engine no longer has throws "There is no open Connection"; ticket 06 decides the final behavior.
 - Ticket 11's refusal by Send budget will need `send` to return a value; it returns `void` today.

@@ -147,6 +147,36 @@ test("stopping the Server tells every connected Client it was closed by the Serv
   );
 });
 
+test("stopping the Server with the game's code tells every connected Client that code, so that a shutdown differs from a kick", async () => {
+  const { clock, server, closed, connectClient } = await setup();
+  const kicked = await connectClient();
+  const staying = await connectClient();
+
+  kicked.connection.close();
+  clock.advance(0);
+  server.stop(1001);
+  clock.advance(0);
+
+  expect(kicked.closed).toEqual([{ kind: "closedByServer", code: 0 }]);
+  expect(staying.closed).toEqual([{ kind: "closedByServer", code: 1001 }]);
+  expect(closed).toEqual([
+    [kicked.connection, { kind: "closedByServer", code: 0 }],
+    [staying.connection, { kind: "closedByServer", code: 1001 }],
+  ]);
+});
+
+test("stopping the Server with a code that cannot travel fails at once and leaves it running", async () => {
+  const { clock, server, closed, connectClient } = await setup();
+  const { closed: clientClosed } = await connectClient();
+
+  for (const code of [-1, 1.5, MAX_CLOSE_CODE + 1])
+    expect(() => server.stop(code)).toThrow(RangeError);
+  clock.advance(1000);
+
+  expect(closed).toEqual([]);
+  expect(clientClosed).toEqual([]);
+});
+
 test("a Client that stops responding closes its Connection on the Server with a timeout reason after the configured delay", async () => {
   const { clock, closed, connectClient } = await setup({ timeout: 5000 });
   const { connection, link } = await connectClient();
@@ -213,6 +243,24 @@ test("a Connection on which neither side sends any Message stays open well beyon
 
   expect(closed).toEqual([]);
   expect(clientClosed).toEqual([]);
+});
+
+test("an idle Connection stays open whichever side has the much shorter timeout", async () => {
+  for (const [timeout, clientTimeout] of [
+    [10_000, 400],
+    [400, 10_000],
+  ]) {
+    const { clock, closed, connectClient } = await setup({
+      timeout,
+      clientTimeout,
+    });
+    const { closed: clientClosed } = await connectClient();
+
+    clock.advance(60_000);
+
+    expect(closed).toEqual([]);
+    expect(clientClosed).toEqual([]);
+  }
 });
 
 test("after a Connection closed event, sending on that Connection fails clearly on either side", async () => {

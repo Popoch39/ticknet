@@ -27,11 +27,19 @@ function fakeSocket(network: SimulatedNetwork) {
   const endpoint = network.bind(SERVER);
   const calls: OutgoingDatagram[][] = [];
   let room = Infinity;
+  let refusing = false;
   const socket: DatagramSocket = {
-    sendMany(packets) {
+    sendMany(datagrams) {
+      if (refusing) {
+        refusing = false;
+        // As Bun's socket throws once a Datagram it sent bounced off a closed port.
+        throw Object.assign(new Error("connection refused, send"), {
+          code: "ECONNREFUSED",
+        });
+      }
       const batch: OutgoingDatagram[] = [];
-      for (let index = 0; index < packets.length; index += 3) {
-        const [data, port, host] = packets.slice(index, index + 3);
+      for (let index = 0; index < datagrams.length; index += 3) {
+        const [data, port, host] = datagrams.slice(index, index + 3);
         if (
           !(data instanceof Uint8Array) ||
           typeof port !== "number" ||
@@ -60,6 +68,10 @@ function fakeSocket(network: SimulatedNetwork) {
     /** The send buffer emptied, without the socket having said so yet. */
     freeRoom() {
       room = Infinity;
+    },
+    /** Makes the next `sendMany` call throw, writing nothing, as after a Datagram bounced off a closed port. */
+    refuseNext() {
+      refusing = true;
     },
   };
 }
@@ -122,4 +134,19 @@ test("Datagrams a full socket could not write are lost, and sending resumes once
   server.broadcast(messages.chat, "three", "unreliable");
   clock.advance(100);
   expect(received).toEqual([["one", "three"], ["three"], ["three"]]);
+});
+
+test("a batch the socket refuses to send, as after a Datagram bounced off a closed port, is lost and the Server keeps ticking", async () => {
+  const { clock, server, socket, received } = await setup();
+  const ticks: number[] = [];
+  server.on("tick", (tick) => ticks.push(tick));
+
+  socket.refuseNext();
+  server.broadcast(messages.chat, "lost", "unreliable");
+  clock.advance(100);
+  server.broadcast(messages.chat, "next", "unreliable");
+  clock.advance(100);
+
+  expect(ticks).toEqual([1, 2]);
+  expect(received).toEqual([["next"], ["next"], ["next"]]);
 });

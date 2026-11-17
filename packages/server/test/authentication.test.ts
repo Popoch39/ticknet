@@ -252,6 +252,30 @@ test("a Client whose authentication never answers times out", async () => {
   expect(opened).toEqual([]);
 });
 
+test("stopping the Server tells a Client still being authenticated that it was closed by the Server, and a later answer opens nothing", async () => {
+  const callback = deferredCallback<undefined>();
+  const { clock, server, opened, connectFrom } = await setup(
+    callback.authenticate,
+  );
+  const outcome = track(connectFrom(CLIENT));
+  clock.advance(0);
+  await settle();
+
+  server.stop(3);
+  clock.advance(0);
+  await settle();
+  expect(outcome.failure).toBeInstanceOf(ConnectError);
+  expect(outcome.failure).toMatchObject({
+    reason: { kind: "closedByServer", code: 3 },
+  });
+
+  callback.answer({ accept: true });
+  await settle();
+  clock.advance(0);
+  await settle();
+  expect(opened).toEqual([]);
+});
+
 const clientAt = (index: number) => ({ host: `10.0.1.${index}`, port: 50000 });
 
 test("with the maximum number of Connections reached, a further Client fails with a Server full reason until one closes", async () => {

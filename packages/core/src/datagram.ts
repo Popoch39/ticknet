@@ -24,12 +24,29 @@ export const CLIENT_HANDSHAKE_SIZE = MAX_DATAGRAM_SIZE;
 
 const HEADER_SIZE = 2;
 
+/**
+ * A sender's timeout in whole milliseconds, which each side tells the other
+ * during the Handshake (the Client in its challenge response, the Server in
+ * its acceptance) so that each keeps the other's timeout from running out.
+ */
+const TIMEOUT_SIZE = 4;
+
+/** The largest timeout the wire can tell; a longer one is sent as this. */
+const MAX_TOLD_TIMEOUT = 0xffffffff;
+
 /** The Auth token's length, before the token itself in a challenge response. */
 const AUTH_TOKEN_LENGTH_SIZE = 2;
 
-/** The largest Auth token that fits in a challenge response, after the challenge. */
+/** The largest Auth token that fits in a challenge response, after the challenge and the Client's timeout. */
 export const MAX_AUTH_TOKEN_SIZE =
-  CLIENT_HANDSHAKE_SIZE - HEADER_SIZE - CHALLENGE_SIZE - AUTH_TOKEN_LENGTH_SIZE;
+  CLIENT_HANDSHAKE_SIZE -
+  HEADER_SIZE -
+  CHALLENGE_SIZE -
+  TIMEOUT_SIZE -
+  AUTH_TOKEN_LENGTH_SIZE;
+
+/** The acceptance is its header, followed by the Server's timeout. */
+const ACCEPTED_SIZE = HEADER_SIZE + TIMEOUT_SIZE;
 
 const KIND_CONNECT_REQUEST = 1;
 const KIND_CHALLENGE = 2;
@@ -205,9 +222,12 @@ export type Datagram =
   | {
       readonly kind: "challengeResponse";
       readonly challenge: Uint8Array;
+      /** The Client's timeout, in milliseconds. */
+      readonly timeout: number;
       readonly authToken: Uint8Array;
     }
-  | { readonly kind: "accepted" }
+  /** Carries the Server's timeout, in milliseconds. */
+  | { readonly kind: "accepted"; readonly timeout: number }
   | { readonly kind: "refused"; readonly reason: RefusalReason }
   | {
       readonly kind: "connected";
@@ -236,17 +256,24 @@ export function encodeDatagram(datagram: Datagram): Uint8Array {
         datagram.challenge,
       );
     case "challengeResponse": {
-      const { challenge, authToken } = datagram;
-      const body = new Uint8Array(
-        CHALLENGE_SIZE + AUTH_TOKEN_LENGTH_SIZE + authToken.byteLength,
-      );
+      const { challenge, timeout, authToken } = datagram;
+      const tokenStart = CHALLENGE_SIZE + TIMEOUT_SIZE + AUTH_TOKEN_LENGTH_SIZE;
+      const body = new Uint8Array(tokenStart + authToken.byteLength);
       body.set(challenge);
-      new DataView(body.buffer).setUint16(CHALLENGE_SIZE, authToken.byteLength);
-      body.set(authToken, CHALLENGE_SIZE + AUTH_TOKEN_LENGTH_SIZE);
+      const view = new DataView(body.buffer);
+      view.setUint32(CHALLENGE_SIZE, toldTimeout(timeout));
+      view.setUint16(CHALLENGE_SIZE + TIMEOUT_SIZE, authToken.byteLength);
+      body.set(authToken, tokenStart);
       return withHeader(KIND_CHALLENGE_RESPONSE, CLIENT_HANDSHAKE_SIZE, body);
     }
-    case "accepted":
-      return withHeader(KIND_ACCEPTED, HEADER_SIZE);
+    case "accepted": {
+      const data = withHeader(KIND_ACCEPTED, ACCEPTED_SIZE);
+      new DataView(data.buffer).setUint32(
+        HEADER_SIZE,
+        toldTimeout(datagram.timeout),
+      );
+      return data;
+    }
     case "refused":
       return encodeRefused(datagram.reason);
     case "connected":
@@ -549,7 +576,16 @@ export function decodeDatagram(
         ? decodeChallengeResponse(data)
         : undefined;
     case KIND_ACCEPTED:
-      return data.byteLength === HEADER_SIZE ? { kind: "accepted" } : undefined;
+      return data.byteLength === ACCEPTED_SIZE
+        ? {
+            kind: "accepted",
+            timeout: new DataView(
+              data.buffer,
+              data.byteOffset,
+              data.byteLength,
+            ).getUint32(HEADER_SIZE),
+          }
+        : undefined;
     case KIND_REFUSED:
       return decodeRefused(data);
     case KIND_CONNECTED:
@@ -561,18 +597,22 @@ export function decodeDatagram(
 }
 
 function decodeChallengeResponse(data: Uint8Array): Datagram | undefined {
-  const tokenStart = HEADER_SIZE + CHALLENGE_SIZE + AUTH_TOKEN_LENGTH_SIZE;
-  const tokenSize = new DataView(
-    data.buffer,
-    data.byteOffset,
-    data.byteLength,
-  ).getUint16(HEADER_SIZE + CHALLENGE_SIZE);
+  const timeoutStart = HEADER_SIZE + CHALLENGE_SIZE;
+  const tokenStart = timeoutStart + TIMEOUT_SIZE + AUTH_TOKEN_LENGTH_SIZE;
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const tokenSize = view.getUint16(timeoutStart + TIMEOUT_SIZE);
   if (tokenSize > MAX_AUTH_TOKEN_SIZE) return undefined;
   return {
     kind: "challengeResponse",
-    challenge: data.slice(HEADER_SIZE, HEADER_SIZE + CHALLENGE_SIZE),
+    challenge: data.slice(HEADER_SIZE, timeoutStart),
+    timeout: view.getUint32(timeoutStart),
     authToken: data.slice(tokenStart, tokenStart + tokenSize),
   };
+}
+
+/** `timeout` as the wire tells it: whole milliseconds, rounded up, up to MAX_TOLD_TIMEOUT. */
+function toldTimeout(timeout: number): number {
+  return Math.min(MAX_TOLD_TIMEOUT, Math.max(0, Math.ceil(timeout)));
 }
 
 /** A zero-filled Datagram of `size` bytes with its header written and `body` right after it. */

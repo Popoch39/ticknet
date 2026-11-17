@@ -41,6 +41,7 @@ export function withNetworkConditions(
   );
   const receiveConditions = options.receive ?? {};
   let receiveLink: ConditionedLink<Received> | undefined;
+  let closed = false;
   return {
     listen(receiver) {
       const link = new ConditionedLink<Received>(
@@ -53,11 +54,14 @@ export function withNetworkConditions(
       receiveLink = link;
       transport.listen({
         // Copied now, since the Transport may reuse its buffer once this returns.
-        datagram: (data, from) =>
-          link.pass(addressKey(from), { data: data.slice(), from }),
+        datagram: (data, from) => {
+          if (!closed)
+            link.pass(addressKey(from), { data: data.slice(), from });
+        },
       });
     },
     send(datagrams) {
+      if (closed) return 0;
       // Copied now, as a socket would, so the sender may reuse its buffer.
       for (const { to, data } of datagrams)
         sendLink.pass(addressKey(to), { to, data: data.slice() });
@@ -65,9 +69,12 @@ export function withNetworkConditions(
       return datagrams.length;
     },
     close() {
-      sendLink.stop();
+      if (closed) return;
+      closed = true;
       receiveLink?.stop();
-      transport.close();
+      // What was sent had left the endpoint, as from a socket closing, so it still arrives: a quitting
+      // Client's close notice included. The Transport inside closes once it has.
+      sendLink.drain(() => transport.close());
     },
   };
 }
