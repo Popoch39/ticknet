@@ -9,6 +9,15 @@
         "typescript": "^7.0.2",
       },
     },
+    "examples/arena": {
+      "name": "@ticknet/arena",
+      "version": "0.0.0",
+      "dependencies": {
+        "@ticknet/client": "workspace:*",
+        "@ticknet/core": "workspace:*",
+        "@ticknet/server": "workspace:*",
+      },
+    },
     "packages/client": {
       "name": "@ticknet/client",
       "version": "0.0.0",
@@ -32,6 +41,8 @@
     },
   },
   "packages": {
+    "@ticknet/arena": ["@ticknet/arena@workspace:examples/arena"],
+
     "@ticknet/client": ["@ticknet/client@workspace:packages/client"],
 
     "@ticknet/core": ["@ticknet/core@workspace:packages/core"],
