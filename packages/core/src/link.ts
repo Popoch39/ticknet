@@ -4,11 +4,26 @@ import {
   type ConnectedDatagram,
   type MessageEntry,
 } from "./datagram";
+import { assertFitsReliableMessage } from "./fragments";
 import type { DeliveryMode } from "./message";
 import { assertFitsInDatagram, Outbox } from "./outbox";
 import { ReceivedSequences } from "./received-sequences";
 import { ReliableReceiver, ReliableSender } from "./reliable-stream";
 import { SentDatagrams, type ConnectionHealth } from "./sent-datagrams";
+
+/**
+ * Throws a RangeError for a Message body too large to be sent with
+ * `delivery`: over one Datagram for an Unreliable or Sequenced Message, which
+ * is never fragmented, over MAX_RELIABLE_MESSAGE_SIZE for a Reliable one.
+ */
+export function assertSendable(
+  id: number,
+  body: Uint8Array,
+  delivery: DeliveryMode,
+): void {
+  if (delivery === "reliable") assertFitsReliableMessage(id, body);
+  else assertFitsInDatagram(id, body, delivery);
+}
 
 /**
  * How long an endpoint with nothing to send on a Connection waits before
@@ -70,12 +85,10 @@ export class Link {
     return this.#reliableOut.overflowed;
   }
 
-  /** Queues a Message until the next flush; throws a RangeError if it can never fit in one Datagram. */
+  /** Queues a Message until the next flush; throws a RangeError for one too large to send (see assertSendable). */
   send(id: number, body: Uint8Array, delivery: DeliveryMode): void {
-    if (delivery === "reliable") {
-      assertFitsInDatagram(id, body, delivery);
-      this.#reliableOut.push(id, body);
-    } else this.#outbox.push(id, body, delivery);
+    if (delivery === "reliable") this.#reliableOut.push(id, body);
+    else this.#outbox.push(id, body, delivery);
   }
 
   /**

@@ -101,9 +101,12 @@ export class Connection<Data = undefined> {
 
   /**
    * Sends a Message to this Client when the current Tick ends. Throws at once
-   * if the Message cannot fit in one Datagram, or if the Connection has
-   * closed. A Reliable Message is sent again until the Client acknowledges
-   * it; with more than MAX_RELIABLE_BACKLOG waiting, the Connection closes.
+   * if an Unreliable or Sequenced Message cannot fit in one Datagram, if a
+   * Reliable one is over MAX_RELIABLE_MESSAGE_SIZE, or if the Connection has
+   * closed. A Reliable Message too large for one Datagram travels as
+   * Fragments. It is sent again until the Client acknowledges it; with more
+   * than MAX_RELIABLE_BACKLOG Reliable Messages or Fragments waiting, the
+   * Connection closes.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#link.send(type.id, type.encode(value), delivery);
@@ -241,7 +244,8 @@ export class Server<Data = undefined> {
 
   /**
    * Sends a Message to every open Connection when the current Tick ends.
-   * Throws at once, sending to none, if the Message cannot fit in one Datagram.
+   * Throws at once, sending to none, if the Message is too large, as `send`
+   * does.
    */
   broadcast<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#engine.broadcast(type.id, type.encode(value), delivery);

@@ -285,6 +285,100 @@ test("an unacknowledged Reliable Message is resent after a delay that follows th
   }
 });
 
+/** A Reliable Message body the Client sends as three Fragments, each byte different from its neighbours. */
+const LARGE = Uint8Array.from({ length: 3000 }, (_, index) => index * 7);
+
+/**
+ * The Datagrams a connected Client puts on the network for LARGE: the three
+ * that first carry its Fragments, one each, and the three that carry them
+ * again when they go unacknowledged.
+ */
+function fragmentedDatagrams() {
+  const { client } = connectedPair();
+  client.send(3, LARGE, "reliable");
+  client.advance(100);
+  const first = client.pollDatagrams().map(({ data }) => data);
+  client.advance(1300);
+  const resent = client.pollDatagrams().map(({ data }) => data);
+  if (first.length !== 3 || resent.length !== 3)
+    throw new Error("Expected each Fragment in its own Datagram, sent twice");
+  return { first, resent };
+}
+
+test("a Message sent as Fragments is delivered once all of them arrived, whatever their order, and repeated Fragments are harmless", () => {
+  const { first, resent } = fragmentedDatagrams();
+  const { server } = connectedPair();
+  const deliver = (...datagrams: (Uint8Array | undefined)[]) => {
+    for (const data of datagrams) if (data) server.receive(data, CLIENT, 100);
+    return messagesIn(server.pollEvents());
+  };
+
+  // The middle Fragment is missing; the others arrive, then arrive again in their resent Datagrams.
+  expect(deliver(first[2], first[0], resent[2], resent[0], first[2])).toEqual(
+    [],
+  );
+
+  expect(deliver(resent[1])).toEqual([{ id: 3, body: LARGE }]);
+  expect(deliver(first[1], ...resent, ...first)).toEqual([]);
+});
+
+/** Bytes 25 and 27 of a Datagram carrying one Fragment: its index and the Fragment count (16 bits each). */
+function withFragmentFields(
+  data: Uint8Array,
+  fields: { index: number; count: number },
+): Uint8Array {
+  const changed = data.slice();
+  const view = new DataView(changed.buffer);
+  view.setUint16(20 + 5, fields.index);
+  view.setUint16(20 + 7, fields.count);
+  return changed;
+}
+
+test("a Fragment claiming an impossible count or index is dropped, and the stream goes on as if it never came", () => {
+  const { first } = fragmentedDatagrams();
+  const [opening] = first;
+  if (!opening) throw new Error("Expected a first Fragment");
+  const { server } = connectedPair();
+
+  for (const fields of [
+    { index: 0, count: 0xffff },
+    { index: 0, count: 0 },
+    { index: 0, count: 1 },
+    { index: 3, count: 3 },
+    { index: 0xffff, count: 3 },
+  ])
+    server.receive(withFragmentFields(opening, fields), CLIENT, 100);
+  expect(server.pollEvents()).toEqual([]);
+
+  for (const data of first) server.receive(data, CLIENT, 100);
+  expect(messagesIn(server.pollEvents())).toEqual([{ id: 3, body: LARGE }]);
+});
+
+test("Fragments out of place in their Message are dropped along with it, and the Reliable stream goes on behind them", () => {
+  const { client } = connectedPair();
+  client.send(3, LARGE, "reliable");
+  client.send(4, Uint8Array.of(9), "reliable");
+  client.advance(100);
+  const sent = client.pollDatagrams().map(({ data }) => data);
+  const [opening, middle, closing] = sent;
+  if (!opening || !middle || !closing || sent.length !== 3)
+    throw new Error("Expected each Fragment in its own Datagram");
+
+  for (const fields of [
+    { index: 1, count: 4 },
+    { index: 2, count: 3 },
+    { index: 0, count: 3 },
+  ]) {
+    const { server } = connectedPair();
+    for (const data of [opening, withFragmentFields(middle, fields), closing])
+      server.receive(data, CLIENT, 100);
+
+    expect(messagesIn(server.pollEvents())).toEqual([
+      { id: 4, body: Uint8Array.of(9) },
+    ]);
+  }
+});
+
 test("each Datagram the Client sends, on its own, acknowledges the Server's recent Datagrams", () => {
   for (const index of [0, 1, 2]) {
     const { server, connection, answers } = clientAnswersServer();
