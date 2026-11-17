@@ -56,13 +56,17 @@ const MAX_ACKNOWLEDGEMENT_DELAY = 0xffff;
  * Each Message entry is a type byte, the Message id (16 bits), the type's own
  * fields, the body length (16 bits), then the body. An Unreliable entry has no
  * fields of its own; a Sequenced or a Reliable entry has its sequence number
- * (16 bits). The type byte leaves room for Fragment entries.
+ * (16 bits). A Fragment entry carries one piece of a Reliable Message too
+ * large for one Datagram: its Reliable sequence number, then the piece's
+ * index and the Message's Fragment count (16 bits each).
  */
 const ENTRY_UNRELIABLE = 1;
 const ENTRY_SEQUENCED = 2;
 const ENTRY_RELIABLE = 3;
+const ENTRY_FRAGMENT = 4;
 const UNRELIABLE_HEADER_SIZE = 5;
 const SEQUENCED_HEADER_SIZE = 7;
+const FRAGMENT_HEADER_SIZE = 11;
 
 /**
  * Sequenced sequence numbers count modulo 2^16, per Message type, so a
@@ -79,6 +83,23 @@ export const RELIABLE_SEQUENCE_MASK = 0xffff;
  */
 export const MAX_DATAGRAM_MESSAGE_SIZE =
   MAX_DATAGRAM_SIZE - CONNECTED_HEADER_SIZE - SEQUENCED_HEADER_SIZE;
+
+/** The largest piece of a Reliable Message one Fragment carries, so that a Fragment fills a Datagram on its own. */
+export const MAX_FRAGMENT_BODY_SIZE =
+  MAX_DATAGRAM_SIZE - CONNECTED_HEADER_SIZE - FRAGMENT_HEADER_SIZE;
+
+/**
+ * The largest Reliable Message, 256 KiB once encoded: one larger is refused
+ * when sent. Its 225 Fragments, each taking a Reliable sequence number, stay
+ * well under MAX_RELIABLE_BACKLOG, so that a Message this large leaves room
+ * in the Reliable stream for the Messages around it.
+ */
+export const MAX_RELIABLE_MESSAGE_SIZE = 256 * 1024;
+
+/** The most Fragments a Reliable Message is split into; a Fragment claiming more is dropped. */
+export const MAX_FRAGMENT_COUNT = Math.ceil(
+  MAX_RELIABLE_MESSAGE_SIZE / MAX_FRAGMENT_BODY_SIZE,
+);
 
 /** The reasons a Server can refuse a Client for, before any Connection exists. */
 type RefusalReason = Extract<
@@ -124,12 +145,20 @@ export type MessageEntry =
   | {
       readonly delivery: "reliable";
       readonly id: number;
-      /** Counts the Reliable Messages, of every type, one side sent on one Connection, wrapping at 2^16. */
+      /** Counts the Reliable Messages and Fragments, of every type, one side sent on one Connection, wrapping at 2^16. */
       readonly sequence: number;
       readonly body: Uint8Array;
+      /** Present on a Fragment, whose body is one piece of the Message. */
+      readonly fragment?: FragmentPosition;
     };
 
 export type ReliableEntry = Extract<MessageEntry, { delivery: "reliable" }>;
+
+/** Where a Fragment's piece sits in its Message: index from 0, out of `count` Fragments. */
+export interface FragmentPosition {
+  readonly index: number;
+  readonly count: number;
+}
 
 /**
  * Whether Sequenced sequence number `a` was sent after `b`: it is, when it is
@@ -311,17 +340,21 @@ function decodeRefused(data: Uint8Array): Datagram | undefined {
 
 /** The bytes `message` takes in a connected Datagram. */
 function entrySize(message: MessageEntry): number {
-  const header =
-    message.delivery === "unreliable"
-      ? UNRELIABLE_HEADER_SIZE
-      : SEQUENCED_HEADER_SIZE;
-  return header + message.body.byteLength;
+  return entryHeaderSize(message) + message.body.byteLength;
+}
+
+function entryHeaderSize(message: MessageEntry): number {
+  if (message.delivery === "unreliable") return UNRELIABLE_HEADER_SIZE;
+  if (message.delivery === "reliable" && message.fragment)
+    return FRAGMENT_HEADER_SIZE;
+  return SEQUENCED_HEADER_SIZE;
 }
 
 /**
  * Splits Messages, in order, into the groups that each fit in one connected
  * Datagram, filling each group before starting the next. Every body must be
- * at most MAX_DATAGRAM_MESSAGE_SIZE bytes.
+ * at most MAX_DATAGRAM_MESSAGE_SIZE bytes, or MAX_FRAGMENT_BODY_SIZE for a
+ * Fragment.
  */
 export function packMessages(
   messages: readonly MessageEntry[],
@@ -367,21 +400,27 @@ function encodeConnected({
   );
   let offset = CONNECTED_HEADER_SIZE;
   for (const message of messages) {
+    const fragment =
+      message.delivery === "reliable" ? message.fragment : undefined;
+    view.setUint8(
+      offset,
+      message.delivery === "unreliable"
+        ? ENTRY_UNRELIABLE
+        : message.delivery === "sequenced"
+          ? ENTRY_SEQUENCED
+          : fragment
+            ? ENTRY_FRAGMENT
+            : ENTRY_RELIABLE,
+    );
     view.setUint16(offset + 1, message.id);
-    let bodyStart: number;
-    if (message.delivery !== "unreliable") {
-      view.setUint8(
-        offset,
-        message.delivery === "sequenced" ? ENTRY_SEQUENCED : ENTRY_RELIABLE,
-      );
+    if (message.delivery !== "unreliable")
       view.setUint16(offset + 3, message.sequence);
-      view.setUint16(offset + 5, message.body.byteLength);
-      bodyStart = offset + SEQUENCED_HEADER_SIZE;
-    } else {
-      view.setUint8(offset, ENTRY_UNRELIABLE);
-      view.setUint16(offset + 3, message.body.byteLength);
-      bodyStart = offset + UNRELIABLE_HEADER_SIZE;
+    if (fragment) {
+      view.setUint16(offset + 5, fragment.index);
+      view.setUint16(offset + 7, fragment.count);
     }
+    const bodyStart = offset + entryHeaderSize(message);
+    view.setUint16(bodyStart - 2, message.body.byteLength);
     data.set(message.body, bodyStart);
     offset = bodyStart + message.body.byteLength;
   }
@@ -400,7 +439,9 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
         ? UNRELIABLE_HEADER_SIZE
         : type === ENTRY_SEQUENCED || type === ENTRY_RELIABLE
           ? SEQUENCED_HEADER_SIZE
-          : undefined;
+          : type === ENTRY_FRAGMENT
+            ? FRAGMENT_HEADER_SIZE
+            : undefined;
     if (headerSize === undefined || offset + headerSize > data.byteLength)
       return undefined;
     const id = view.getUint16(offset + 1);
@@ -409,16 +450,28 @@ function decodeConnected(data: Uint8Array): Datagram | undefined {
     const bodyEnd = bodyStart + view.getUint16(bodyStart - 2);
     if (bodyEnd > data.byteLength) return undefined;
     const body = data.slice(bodyStart, bodyEnd);
-    messages.push(
-      type === ENTRY_UNRELIABLE
-        ? { delivery: "unreliable", id, body }
-        : {
-            delivery: type === ENTRY_SEQUENCED ? "sequenced" : "reliable",
-            id,
-            sequence: view.getUint16(offset + 3),
-            body,
-          },
-    );
+    if (type === ENTRY_UNRELIABLE) {
+      messages.push({ delivery: "unreliable", id, body });
+    } else if (type === ENTRY_FRAGMENT) {
+      const index = view.getUint16(offset + 5);
+      const count = view.getUint16(offset + 7);
+      // A Message that fits in one Datagram is never fragmented, nor is one over MAX_RELIABLE_MESSAGE_SIZE.
+      if (count < 2 || count > MAX_FRAGMENT_COUNT || index >= count)
+        return undefined;
+      messages.push({
+        delivery: "reliable",
+        id,
+        sequence: view.getUint16(offset + 3),
+        body,
+        fragment: { index, count },
+      });
+    } else
+      messages.push({
+        delivery: type === ENTRY_SEQUENCED ? "sequenced" : "reliable",
+        id,
+        sequence: view.getUint16(offset + 3),
+        body,
+      });
     offset = bodyEnd;
   }
   return {

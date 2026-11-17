@@ -193,10 +193,12 @@ export class Client {
 
   /**
    * Sends a Message to the Server at the next step of the send rate. Throws
-   * at once if the Message cannot fit in one Datagram, or if the Connection
-   * has closed. A Reliable Message is sent again until the Server
-   * acknowledges it; with more than MAX_RELIABLE_BACKLOG waiting, the
-   * Connection closes.
+   * at once if an Unreliable or Sequenced Message cannot fit in one
+   * Datagram, if a Reliable one is over MAX_RELIABLE_MESSAGE_SIZE, or if the
+   * Connection has closed. A Reliable Message too large for one Datagram
+   * travels as Fragments. It is sent again until the Server acknowledges it;
+   * with more than MAX_RELIABLE_BACKLOG Reliable Messages or Fragments
+   * waiting, the Connection closes.
    */
   send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
     this.#engine.send(type.id, type.encode(value), delivery);

@@ -9,7 +9,7 @@ import type { DeliveryMode } from "./message";
 export function assertFitsInDatagram(
   id: number,
   body: Uint8Array,
-  delivery: DeliveryMode,
+  delivery: Exclude<DeliveryMode, "reliable">,
 ): void {
   if (body.byteLength > MAX_DATAGRAM_MESSAGE_SIZE)
     throw new RangeError(
@@ -17,10 +17,9 @@ export function assertFitsInDatagram(
     );
 }
 
-const MODE_NAMES: Record<DeliveryMode, string> = {
+const MODE_NAMES: Record<Exclude<DeliveryMode, "reliable">, string> = {
   unreliable: "an Unreliable",
   sequenced: "a Sequenced",
-  reliable: "a Reliable",
 };
 
 /**

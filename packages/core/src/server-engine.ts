@@ -9,8 +9,7 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { keepaliveInterval, Link } from "./link";
-import { assertFitsInDatagram } from "./outbox";
+import { assertSendable, keepaliveInterval, Link } from "./link";
 import type { ConnectionHealth } from "./sent-datagrams";
 import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
@@ -143,7 +142,7 @@ export class ServerEngine implements Engine<ServerEvent> {
 
   /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
   broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
-    assertFitsInDatagram(id, body, delivery);
+    assertSendable(id, body, delivery);
     for (const open of this.#byId.values()) open.link.send(id, body, delivery);
   }
 
