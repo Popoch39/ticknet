@@ -23,6 +23,12 @@ export interface ClientOptions {
   /** Replaces real time, for tests with a manual Clock. */
   readonly clock?: Clock;
   /**
+   * Wraps the Transport the Client uses, its UDP socket or the injected one,
+   * with the Client's Clock; for example `withNetworkConditions` from
+   * `@ticknet/core/testing`, to play over a bad link.
+   */
+  readonly wrapTransport?: (transport: Transport, clock: Clock) => Transport;
+  /**
    * Milliseconds to wait for the Server before giving up, during the
    * Handshake and then whenever nothing arrives from it; 10 seconds by
    * default.
@@ -254,6 +260,8 @@ function handshake(
   clock: Clock,
   opened: (arrivals: Arrivals) => void,
 ): Promise<Client> {
+  if (options.wrapTransport)
+    transport = options.wrapTransport(transport, clock);
   return new Promise((resolve, reject) => {
     let engine: ClientEngine;
     try {

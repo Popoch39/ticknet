@@ -100,3 +100,34 @@ test("network conditions wrapped around a real UDP socket delay and duplicate it
   client.close();
   server.stop();
 });
+
+test("a Client's own UDP socket can be wrapped in network conditions on the Client's Clock, which delay its Datagrams", async () => {
+  const server = await startServer({});
+  if (server.port === undefined) throw new Error("The Server has no UDP port");
+  server.onMessage(messages.count, (connection, value) =>
+    connection.send(messages.count, value, "unreliable"),
+  );
+  const client = await connect({
+    host: "127.0.0.1",
+    port: server.port,
+    wrapTransport: (transport, clock) =>
+      withNetworkConditions(transport, {
+        clock,
+        send: { latency: 100 },
+        receive: { latency: 100 },
+      }),
+  });
+  const atClient = recorder();
+  client.onMessage(messages.count, (value) => atClient.record(value));
+
+  const start = performance.now();
+  client.send(messages.count, 7, "unreliable");
+  await atClient.until(7);
+  const roundTrip = performance.now() - start;
+
+  expect(atClient.values).toEqual([7]);
+  // Without the latency, waiting for the next send step and Tick takes at most two 33 ms steps.
+  expect(roundTrip).toBeGreaterThanOrEqual(200);
+  client.close();
+  server.stop();
+});

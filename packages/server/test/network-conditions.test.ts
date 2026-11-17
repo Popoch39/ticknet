@@ -3,6 +3,7 @@ import { connect, type Client } from "@ticknet/client";
 import {
   ManualClock,
   SimulatedNetwork,
+  withNetworkConditions,
   type EndpointConditions,
   type NetworkConditions,
 } from "@ticknet/core/testing";
@@ -79,7 +80,7 @@ async function setup(
     return { client, connection };
   }
 
-  return { clock, server, connectClient };
+  return { clock, network, server, connectClient };
 }
 
 /** Lets every pending promise callback run, without moving the Clock. */
@@ -231,6 +232,30 @@ test("loss on the Client-to-Server path only leaves the Server-to-Client path wh
   expect(atClient).toEqual(range(100));
   expect(atServer.length).toBeGreaterThan(30);
   expect(atServer.length).toBeLessThan(70);
+});
+
+test("a Client's injected Transport can be wrapped in network conditions, which run on the Client's own Clock", async () => {
+  const { clock, network } = await setup();
+  let connected = false;
+  connect({
+    ...SERVER,
+    transport: network.bind({ host: "10.0.0.2", port: 50000 }),
+    clock,
+    wrapTransport: (transport, wrapClock) =>
+      withNetworkConditions(transport, {
+        clock: wrapClock,
+        send: { latency: 50 },
+        receive: { latency: 50 },
+      }),
+  }).then(() => (connected = true));
+
+  // The Handshake takes two round trips of 100 ms on the Client's Clock.
+  clock.advance(199);
+  await settle();
+  expect(connected).toBe(false);
+  clock.advance(1);
+  await settle();
+  expect(connected).toBe(true);
 });
 
 test("with every Datagram duplicated, each Unreliable Message is still delivered exactly once, both ways", async () => {
