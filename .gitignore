@@ -3,3 +3,6 @@ dist/
 coverage/
 *.tsbuildinfo
 *.tgz
+# Copied from the root by `bun run build`, to be published with each package.
+packages/*/README.md
+packages/*/LICENSE

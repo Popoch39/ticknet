@@ -1,10 +1,26 @@
 {
   "name": "@ticknet/core",
   "version": "0.0.0",
+  "description": "The sans-IO protocol core of ticknet, a UDP transport for real-time Bun games.",
   "license": "MIT",
   "type": "module",
+  "scripts": {
+    "prepack": "bun ../../scripts/build.ts"
+  },
   "exports": {
-    ".": "./src/index.ts",
-    "./testing": "./src/testing/index.ts"
-  }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist"
+  ]
 }

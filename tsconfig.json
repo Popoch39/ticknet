@@ -5,6 +5,7 @@
     { "path": "packages/core/test" },
     { "path": "packages/server" },
     { "path": "packages/client" },
-    { "path": "examples/arena" }
+    { "path": "examples/arena" },
+    { "path": "scripts" }
   ]
 }

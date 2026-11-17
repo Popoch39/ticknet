@@ -1,0 +1,14 @@
+// Emits the declarations published with server (`bun run build`), against
+// core's published declarations rather than its source.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {},
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}

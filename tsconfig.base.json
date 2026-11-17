@@ -11,6 +11,16 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    // Inside the workspace, the packages are used from source, by `bun check`
+    // and by Bun itself, which reads these paths at run time. Their `exports`
+    // point at the built output, for those who install them; the build
+    // configurations clear these paths to check that output instead.
+    "paths": {
+      "@ticknet/core": ["./packages/core/src/index.ts"],
+      "@ticknet/core/testing": ["./packages/core/src/testing/index.ts"],
+      "@ticknet/server": ["./packages/server/src/index.ts"],
+      "@ticknet/client": ["./packages/client/src/index.ts"]
+    }
   }
 }
