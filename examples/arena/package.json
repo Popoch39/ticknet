@@ -1,0 +1,17 @@
+{
+  "name": "@ticknet/arena",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "server": "bun src/server.ts",
+    "client": "bun src/client.ts",
+    "bots": "bun src/bots.ts"
+  },
+  "dependencies": {
+    "@ticknet/client": "workspace:*",
+    "@ticknet/core": "workspace:*",
+    "@ticknet/server": "workspace:*"
+  }
+}
