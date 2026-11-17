@@ -12,6 +12,7 @@ import { assertFitsInDatagram, Outbox } from "./outbox";
 import { ReceivedSequences } from "./received-sequences";
 import { ReliableReceiver, ReliableSender } from "./reliable-stream";
 import { SentDatagrams, type ConnectionHealth } from "./sent-datagrams";
+import { SequencedOrder } from "./sequenced-order";
 
 /**
  * Throws a RangeError for a Message body too large to be sent with
@@ -68,8 +69,8 @@ const FIRST_DATAGRAM_SEQUENCE = 2 ** 32 - 4096;
 
 /**
  * One side of an open Connection, the same on the Server and the Client:
- * the Messages it queued, its Reliable stream each way, the connected
- * Datagrams it received, and what the other side acknowledged of those it
+ * the Messages it queued, its Reliable stream each way, the order of the
+ * Sequenced Messages it delivered, the connected Datagrams it received, and what the other side acknowledged of those it
  * sent. Every connected Datagram it sends carries an acknowledgement of the
  * most recent ones it received; a keepalive is one without Messages, so the
  * other side keeps acknowledging an idle Connection and its health stays
@@ -79,6 +80,7 @@ export class Link {
   readonly #outbox = new Outbox();
   readonly #reliableOut = new ReliableSender();
   readonly #reliableIn = new ReliableReceiver();
+  readonly #sequenced = new SequencedOrder();
   readonly #received = new ReceivedSequences();
   readonly #sent = new SentDatagrams();
   readonly #keepaliveInterval: number;
@@ -138,7 +140,8 @@ export class Link {
    * Takes in a connected Datagram received at `now`. Returns the Messages
    * to deliver, in order, or undefined for a copy of a Datagram already
    * received. A Reliable Message that arrives ahead of one still missing is
-   * held back and returned behind it once it arrives.
+   * held back and returned behind it once it arrives; a Sequenced Message
+   * older than one of its type already delivered is left out.
    */
   receive(
     datagram: ConnectedDatagram,
@@ -151,11 +154,13 @@ export class Link {
     ))
       this.#reliableOut.acknowledge(sequence);
     if (datagram.messages.length > 0) this.#acknowledgementDue = true;
-    return datagram.messages.flatMap<MessageEntry>((message) =>
-      message.delivery === "reliable"
-        ? this.#reliableIn.receive(message)
-        : [message],
-    );
+    return datagram.messages
+      .flatMap<MessageEntry>((message) =>
+        message.delivery === "reliable"
+          ? this.#reliableIn.receive(message)
+          : [message],
+      )
+      .filter((message) => this.#sequenced.admit(message));
   }
 
   /**

@@ -15,7 +15,6 @@ import {
   Link,
 } from "./link";
 import type { ConnectionHealth } from "./sent-datagrams";
-import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 export type ClientEvent =
@@ -72,12 +71,11 @@ export class ClientEngine implements Engine<ClientEvent> {
    * keepalives fit in it; nothing is sent on the first one.
    */
   #link: Link;
-  readonly #sequenced = new SequencedOrder();
   /** Send steps taken since the Connection opened; stamped on Datagrams as the Client's Tick number. */
   #step = 0;
   #lastServerTick: number | undefined;
-  #datagrams: OutgoingDatagram[] = [];
-  #events: ClientEvent[] = [];
+  readonly #datagrams: OutgoingDatagram[] = [];
+  readonly #events: ClientEvent[] = [];
 
   /**
    * Throws a RangeError, before sending anything, if the Auth token cannot
@@ -182,13 +180,8 @@ export class ClientEngine implements Engine<ClientEvent> {
           datagram.tick > this.#lastServerTick
         )
           this.#lastServerTick = datagram.tick;
-        for (const message of messages)
-          if (this.#sequenced.admit(message))
-            this.#events.push({
-              type: "message",
-              id: message.id,
-              body: message.body,
-            });
+        for (const { id, body } of messages)
+          this.#events.push({ type: "message", id, body });
         break;
       }
       case "close":
@@ -233,15 +226,11 @@ export class ClientEngine implements Engine<ClientEvent> {
   }
 
   pollDatagrams(): OutgoingDatagram[] {
-    const datagrams = this.#datagrams;
-    this.#datagrams = [];
-    return datagrams;
+    return this.#datagrams.splice(0);
   }
 
   pollEvents(): ClientEvent[] {
-    const events = this.#events;
-    this.#events = [];
-    return events;
+    return this.#events.splice(0);
   }
 
   #newLink(serverTimeout: number, now: number): Link {

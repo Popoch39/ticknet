@@ -18,7 +18,6 @@ import {
   Link,
 } from "./link";
 import type { ConnectionHealth } from "./sent-datagrams";
-import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
 
 /** Identifies a Connection within one Server, from its authentication on; never reused. */
@@ -78,7 +77,6 @@ interface OpenConnection {
   /** The challenge whose echo opened it, which tells a repeated echo from a new attempt. */
   readonly challenge: Uint8Array;
   readonly link: Link;
-  readonly sequenced: SequencedOrder;
 }
 
 /**
@@ -137,8 +135,8 @@ export class ServerEngine implements Engine<ServerEvent> {
   /** The time the current Tick started at, which its flush counts as the time of sending. */
   #tickStartedAt = 0;
   #tickState: "between" | "started" | "ending" = "between";
-  #datagrams: OutgoingDatagram[] = [];
-  #events: ServerEvent[] = [];
+  readonly #datagrams: OutgoingDatagram[] = [];
+  readonly #events: ServerEvent[] = [];
 
   constructor(config: ServerEngineConfig, now: number) {
     // An authentication starts no earlier than its challenge was issued, so an echo the Client resends
@@ -232,14 +230,8 @@ export class ServerEngine implements Engine<ServerEvent> {
         const messages = open?.link.receive(datagram, now);
         if (!open || !messages) break;
         this.#heardFrom(open.id, now);
-        for (const message of messages)
-          if (open.sequenced.admit(message))
-            this.#events.push({
-              type: "message",
-              connection: open.id,
-              id: message.id,
-              body: message.body,
-            });
+        for (const { id, body } of messages)
+          this.#events.push({ type: "message", connection: open.id, id, body });
         break;
       }
       case "close": {
@@ -270,7 +262,6 @@ export class ServerEngine implements Engine<ServerEvent> {
         now,
         this.#sendBudget,
       ),
-      sequenced: new SequencedOrder(),
     };
     this.#byAddress.set(addressKey(address), open);
     this.#byId.set(connection, open);
@@ -383,16 +374,12 @@ export class ServerEngine implements Engine<ServerEvent> {
           this.#datagrams.push({ to: open.address, data });
       }
     }
-    const datagrams = this.#datagrams;
-    this.#datagrams = [];
-    return datagrams;
+    return this.#datagrams.splice(0);
   }
 
   pollEvents(): ServerEvent[] {
     if (this.#tickState === "started") this.#tickState = "ending";
-    const events = this.#events;
-    this.#events = [];
-    return events;
+    return this.#events.splice(0);
   }
 
   #heardFrom(connection: ConnectionId, now: number): void {
