@@ -188,6 +188,25 @@ test("Reliable Messages over the Send budget are sent in later Ticks, exactly on
   }
 });
 
+test("the Fragments of a large Reliable Message are spread over Ticks within the Send budget and the Message arrives intact", async () => {
+  const { clock, server, client, connection, serverSide, clientSide } =
+    await connected({ sendBudget: 2400, conditions: badLink });
+  const large = Uint8Array.from({ length: 50_000 }, (_, i) => i % 251);
+  const atServer: Uint8Array[] = [];
+  const atClient: Uint8Array[] = [];
+  server.onMessage(messages.blob, (_from, value) => atServer.push(value));
+  client.onMessage(messages.blob, (value) => atClient.push(value));
+
+  client.send(messages.blob, large, "reliable");
+  connection.send(messages.blob, large, "reliable");
+  clock.advance(10_000);
+
+  expect(atServer).toEqual([large]);
+  expect(atClient).toEqual([large]);
+  expect(serverSide.largest()).toBeLessThanOrEqual(2400);
+  expect(clientSide.largest()).toBeLessThanOrEqual(2400);
+});
+
 /** Sends Unreliable Messages through `send` until the budget refuses one, to the last byte. */
 function fill(
   send: (body: Uint8Array) => boolean,

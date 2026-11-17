@@ -9,6 +9,7 @@ export {
   MAX_AUTH_TOKEN_SIZE,
   MAX_DATAGRAM_MESSAGE_SIZE,
   MAX_DATAGRAM_SIZE,
+  MAX_RELIABLE_MESSAGE_SIZE,
   PROTOCOL_VERSION,
 } from "./datagram";
 export { EngineDriver, type Engine } from "./engine";

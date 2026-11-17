@@ -107,9 +107,12 @@ export class Connection<Data = undefined> {
 
   /**
    * Sends a Message to this Client when the current Tick ends. Throws at once
-   * if the Message cannot fit in one Datagram, or if the Connection has
-   * closed. A Reliable Message is sent again until the Client acknowledges
-   * it; with more than MAX_RELIABLE_BACKLOG waiting, the Connection closes.
+   * if an Unreliable or Sequenced Message cannot fit in one Datagram, if a
+   * Reliable one is over MAX_RELIABLE_MESSAGE_SIZE, or if the Connection has
+   * closed. A Reliable Message too large for one Datagram travels as
+   * Fragments. It is sent again until the Client acknowledges it; with more
+   * than MAX_RELIABLE_BACKLOG Reliable Messages or Fragments waiting, the
+   * Connection closes.
    *
    * Returns false, sending nothing, when an Unreliable or Sequenced Message
    * does not fit in what is left of this Tick's Send budget. A Reliable
@@ -252,10 +255,10 @@ export class Server<Data = undefined> {
 
   /**
    * Sends a Message to every open Connection when the current Tick ends.
-   * Throws at once, sending to none, if the Message cannot fit in one Datagram.
-   * Returns the Connections that refused an Unreliable or Sequenced Message
-   * because it did not fit in what is left of their Send budget for this
-   * Tick; empty when every one took it.
+   * Throws at once, sending to none, if the Message is too large, as `send`
+   * does. Returns the Connections that refused an Unreliable or Sequenced
+   * Message because it did not fit in what is left of their Send budget for
+   * this Tick; empty when every one took it.
    */
   broadcast<T>(
     type: MessageType<T>,

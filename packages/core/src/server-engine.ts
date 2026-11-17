@@ -10,12 +10,12 @@ import {
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
 import {
+  assertSendable,
   assertSendBudget,
   DEFAULT_SEND_BUDGET,
   keepaliveInterval,
   Link,
 } from "./link";
-import { assertFitsInDatagram } from "./outbox";
 import type { ConnectionHealth } from "./sent-datagrams";
 import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
@@ -164,7 +164,7 @@ export class ServerEngine implements Engine<ServerEvent> {
     body: Uint8Array,
     delivery: DeliveryMode,
   ): ConnectionId[] {
-    assertFitsInDatagram(id, body, delivery);
+    assertSendable(id, body, delivery);
     const refused: ConnectionId[] = [];
     for (const open of this.#byId.values())
       if (!open.link.send(id, body, delivery)) refused.push(open.id);

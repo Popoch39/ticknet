@@ -4,14 +4,15 @@ import {
   type MessageEntry,
   type ReliableEntry,
 } from "./datagram";
+import { assertFitsReliableMessage, piecesOf, Reassembly } from "./fragments";
 import { TRACKED_DATAGRAMS } from "./sent-datagrams";
 
 /**
  * The most Reliable Messages one side of a Connection may have waiting for
  * acknowledgement, counted from the oldest one not acknowledged yet to the
- * newest one sent; one more closes the Connection with a
- * reliableBacklogOverflow reason, rather than letting a link that cannot
- * keep up eat memory.
+ * newest one sent, each Fragment of a large one counting as one; one more
+ * closes the Connection with a reliableBacklogOverflow reason, rather than
+ * letting a link that cannot keep up eat memory.
  *
  * It is also how far ahead of the next Reliable Message it expects the
  * receiving side accepts one, so a sender never has one in flight that the
@@ -40,16 +41,24 @@ export class ReliableSender {
   readonly #carried = new Map<number, OutgoingReliable[]>();
   #waiting = new PackedSize();
 
+  /**
+   * Queues a Reliable Message, as Fragments that each take a sequence number
+   * if it is too large for one Datagram. Throws a RangeError, before queuing
+   * anything, for one over MAX_RELIABLE_MESSAGE_SIZE.
+   */
   push(id: number, body: Uint8Array): void {
-    const entry: ReliableEntry = {
-      delivery: "reliable",
-      id,
-      sequence: this.#nextSequence,
-      body,
-    };
-    this.#backlog.push({ entry, resendAt: -Infinity, acknowledged: false });
-    this.#waiting.add(entry);
-    this.#nextSequence = (this.#nextSequence + 1) & RELIABLE_SEQUENCE_MASK;
+    assertFitsReliableMessage(id, body);
+    for (const piece of piecesOf(body)) {
+      const entry: ReliableEntry = {
+        delivery: "reliable",
+        id,
+        sequence: this.#nextSequence,
+        ...piece,
+      };
+      this.#backlog.push({ entry, resendAt: -Infinity, acknowledged: false });
+      this.#waiting.add(entry);
+      this.#nextSequence = (this.#nextSequence + 1) & RELIABLE_SEQUENCE_MASK;
+    }
   }
 
   /** Whether more Reliable Messages wait for acknowledgement than MAX_RELIABLE_BACKLOG. */
@@ -129,15 +138,24 @@ export class ReliableSender {
 /**
  * The receiving half of one side's Reliable stream: it hands out each
  * Reliable Message once, in the order the other side sent them, holding back
- * those that arrive ahead of one still missing.
+ * those that arrive ahead of one still missing, and a Message sent as
+ * Fragments once all of them have arrived.
  */
 export class ReliableReceiver {
-  /** The sequence number of the next Reliable Message to deliver. */
+  /** The sequence number of the next Reliable Message or Fragment to let through. */
   #next = 0;
   readonly #held = new Map<number, ReliableEntry>();
+  readonly #reassembly = new Reassembly();
 
-  /** Takes in a received Reliable Message; returns those it lets through, in send order. */
+  /** Takes in a received Reliable Message or Fragment; returns the whole Messages it lets through, in send order. */
   receive(entry: ReliableEntry): ReliableEntry[] {
+    return this.#inOrder(entry).flatMap(
+      (next) => this.#reassembly.add(next) ?? [],
+    );
+  }
+
+  /** Takes in a received Reliable Message or Fragment; returns those it lets through, in send order. */
+  #inOrder(entry: ReliableEntry): ReliableEntry[] {
     const ahead = (entry.sequence - this.#next) & RELIABLE_SEQUENCE_MASK;
     // Behind the next one, it is a copy of one delivered already; further ahead than a sender may have in
     // flight, no sender keeping to MAX_RELIABLE_BACKLOG sent it.
