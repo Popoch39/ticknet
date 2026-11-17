@@ -1,0 +1,20 @@
+# The same gate as locally: type-check, format, tests, then the publishable build.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - run: bun check
+      - run: bun fmt --check
+      - run: bun test
+      - run: bun run build
