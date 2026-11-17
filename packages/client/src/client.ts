@@ -36,6 +36,12 @@ export interface ClientOptions {
    * one Datagram.
    */
   readonly authToken?: Uint8Array;
+  /**
+   * The most bytes the Client puts on the network per send step, resends and
+   * acknowledgements included; DEFAULT_SEND_BUDGET by default. What is left
+   * unused in one step is not carried over.
+   */
+  readonly sendBudget?: number;
 }
 
 /**
@@ -191,9 +197,13 @@ export class Client {
    * has closed. A Reliable Message is sent again until the Server
    * acknowledges it; with more than MAX_RELIABLE_BACKLOG waiting, the
    * Connection closes.
+   *
+   * Returns false, sending nothing, when an Unreliable or Sequenced Message
+   * does not fit in what is left of this send step's Send budget. A Reliable
+   * Message is never refused: what does not fit waits for later steps.
    */
-  send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
-    this.#engine.send(type.id, type.encode(value), delivery);
+  send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): boolean {
+    return this.#engine.send(type.id, type.encode(value), delivery);
   }
 
   /**
@@ -263,6 +273,7 @@ function handshake(
           timeout: options.timeout ?? 10_000,
           sendRate: options.sendRate ?? 30,
           authToken: options.authToken,
+          sendBudget: options.sendBudget,
         },
         clock.now(),
       );

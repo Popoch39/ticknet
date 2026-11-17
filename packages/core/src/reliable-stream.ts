@@ -1,4 +1,5 @@
 import {
+  PackedSize,
   RELIABLE_SEQUENCE_MASK,
   type MessageEntry,
   type ReliableEntry,
@@ -37,13 +38,17 @@ export class ReliableSender {
   #backlog: OutgoingReliable[] = [];
   /** The Reliable Messages each recent Datagram carried, by Datagram sequence number, oldest first. */
   readonly #carried = new Map<number, OutgoingReliable[]>();
+  #waiting = new PackedSize();
 
   push(id: number, body: Uint8Array): void {
-    this.#backlog.push({
-      entry: { delivery: "reliable", id, sequence: this.#nextSequence, body },
-      resendAt: -Infinity,
-      acknowledged: false,
-    });
+    const entry: ReliableEntry = {
+      delivery: "reliable",
+      id,
+      sequence: this.#nextSequence,
+      body,
+    };
+    this.#backlog.push({ entry, resendAt: -Infinity, acknowledged: false });
+    this.#waiting.add(entry);
     this.#nextSequence = (this.#nextSequence + 1) & RELIABLE_SEQUENCE_MASK;
   }
 
@@ -55,20 +60,38 @@ export class ReliableSender {
   /**
    * The Reliable Messages to put in the Datagrams sent at `now`: those never
    * sent, and those still unacknowledged `resendDelay` milliseconds after
-   * they were last sent. None beyond MAX_RELIABLE_BACKLOG, which the other
-   * side would refuse.
+   * they were last sent, in send order, as many as packing them takes at most
+   * `allowance` bytes; the others stay due for a later call. None beyond
+   * MAX_RELIABLE_BACKLOG, which the other side would refuse.
    */
-  take(now: number, resendDelay: number): ReliableEntry[] {
+  take(now: number, resendDelay: number, allowance: number): ReliableEntry[] {
     const due: ReliableEntry[] = [];
+    const size = new PackedSize();
+    this.#waiting = new PackedSize();
     const end = Math.min(this.#backlog.length, MAX_RELIABLE_BACKLOG);
     for (let index = 0; index < end; index++) {
       const outgoing = this.#backlog[index];
       if (!outgoing || outgoing.acknowledged || outgoing.resendAt > now)
         continue;
+      // Past the first one left out, the rest wait too, so that they go out in send order.
+      if (this.#waiting.bytes > 0 || size.with(outgoing.entry) > allowance) {
+        this.#waiting.add(outgoing.entry);
+        continue;
+      }
+      size.add(outgoing.entry);
       outgoing.resendAt = now + resendDelay;
       due.push(outgoing.entry);
     }
     return due;
+  }
+
+  /**
+   * The bytes the Reliable Messages already due take on the network: those
+   * pushed since the last `take`, and those it left out. They are due at the
+   * next `take` whenever it comes, so a sender can keep room for them.
+   */
+  get waiting(): number {
+    return this.#waiting.bytes;
   }
 
   /** Remembers which Reliable Messages the Datagram numbered `sequence` carried. */

@@ -310,7 +310,7 @@ function decodeRefused(data: Uint8Array): Datagram | undefined {
 }
 
 /** The bytes `message` takes in a connected Datagram. */
-function entrySize(message: MessageEntry): number {
+function entrySize(message: Pick<MessageEntry, "delivery" | "body">): number {
   const header =
     message.delivery === "unreliable"
       ? UNRELIABLE_HEADER_SIZE
@@ -340,6 +340,42 @@ export function packMessages(
   }
   if (group.length > 0) groups.push(group);
   return groups;
+}
+
+/**
+ * The bytes a run of Messages takes on the network once `packMessages` has
+ * packed it, Datagram headers included, counted as Messages are added in
+ * order.
+ *
+ * Packing two runs one after the other never takes more than packing each
+ * on its own: the second fills the room the first left in its last Datagram,
+ * and what spills over starts further along the run than it would alone, so
+ * it needs no more Datagrams. Runs counted apart can therefore share a limit.
+ */
+export class PackedSize {
+  #bytes = 0;
+  /** The room left in the last Datagram; none before the first. */
+  #room = 0;
+
+  get bytes(): number {
+    return this.#bytes;
+  }
+
+  /** What `bytes` would become with `message` added. */
+  with(message: Pick<MessageEntry, "delivery" | "body">): number {
+    const size = entrySize(message);
+    return this.#bytes + size + (size > this.#room ? CONNECTED_HEADER_SIZE : 0);
+  }
+
+  add(message: Pick<MessageEntry, "delivery" | "body">): void {
+    const size = entrySize(message);
+    if (size > this.#room) {
+      this.#bytes += CONNECTED_HEADER_SIZE;
+      this.#room = MAX_DATAGRAM_SIZE - CONNECTED_HEADER_SIZE;
+    }
+    this.#bytes += size;
+    this.#room -= size;
+  }
 }
 
 function encodeConnected({

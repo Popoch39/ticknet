@@ -69,6 +69,22 @@ test("once the Client is closed and the Server stopped, the process exits on its
   expect(await child.exited).toBe(0);
 });
 
+test("a Server refused for invalid options releases the port it opened", async () => {
+  const probe = await startServer({});
+  const port = portOf(probe);
+  probe.stop();
+
+  const failure = await startServer({ port, sendBudget: 1 }).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const server = await startServer({ port });
+
+  expect(failure).toBeInstanceOf(RangeError);
+  expect(server.port).toBe(port);
+  server.stop();
+});
+
 test("a stopped Server releases its port, which a new Server can listen on", async () => {
   const first = await startServer({});
   const port = portOf(first);

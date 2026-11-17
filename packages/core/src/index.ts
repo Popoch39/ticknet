@@ -12,6 +12,7 @@ export {
   PROTOCOL_VERSION,
 } from "./datagram";
 export { EngineDriver, type Engine } from "./engine";
+export { DEFAULT_SEND_BUDGET } from "./link";
 export {
   defineMessages,
   MAX_MESSAGE_ID,

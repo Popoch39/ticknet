@@ -1,4 +1,5 @@
 export {
+  DEFAULT_SEND_BUDGET,
   defineMessages,
   MAX_CLOSE_CODE,
   MAX_RELIABLE_BACKLOG,

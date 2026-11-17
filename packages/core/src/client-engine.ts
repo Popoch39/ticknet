@@ -8,7 +8,12 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { keepaliveInterval, Link } from "./link";
+import {
+  assertSendBudget,
+  DEFAULT_SEND_BUDGET,
+  keepaliveInterval,
+  Link,
+} from "./link";
 import type { ConnectionHealth } from "./sent-datagrams";
 import { SequencedOrder } from "./sequenced-order";
 import { addressKey, type Address, type OutgoingDatagram } from "./transport";
@@ -39,6 +44,8 @@ export interface ClientEngineConfig {
   readonly sendRate: number;
   /** Opaque bytes for the Server's authentication callback; at most MAX_AUTH_TOKEN_SIZE. */
   readonly authToken?: Uint8Array;
+  /** The most bytes the Client puts on the network per send step; DEFAULT_SEND_BUDGET by default. */
+  readonly sendBudget?: number;
 }
 
 /**
@@ -67,18 +74,23 @@ export class ClientEngine implements Engine<ClientEvent> {
   #datagrams: OutgoingDatagram[] = [];
   #events: ClientEvent[] = [];
 
-  /** Throws a RangeError, before sending anything, if the Auth token cannot fit in the Handshake. */
+  /**
+   * Throws a RangeError, before sending anything, if the Auth token cannot
+   * fit in the Handshake or the Send budget cannot carry a full Datagram.
+   */
   constructor(config: ClientEngineConfig, now: number) {
     const authToken = config.authToken ?? new Uint8Array(0);
     if (authToken.byteLength > MAX_AUTH_TOKEN_SIZE)
       throw new RangeError(
         `The Auth token is ${authToken.byteLength} bytes long, but at most ${MAX_AUTH_TOKEN_SIZE} fit in the Handshake`,
       );
+    const sendBudget = config.sendBudget ?? DEFAULT_SEND_BUDGET;
+    assertSendBudget(sendBudget);
     // Copied so that the caller may reuse its buffer before the challenge arrives.
     this.#authToken = authToken.slice();
     this.#server = config.server;
     this.#timeout = config.timeout;
-    this.#link = new Link(keepaliveInterval(config.timeout), now);
+    this.#link = new Link(keepaliveInterval(config.timeout), now, sendBudget);
     this.#handshakeDeadline = now + config.timeout;
     this.#sendSteps = new Cadence(now, config.sendRate, "send rate");
     this.#handshakeDatagram = encodeDatagram({ kind: "connectRequest" });
@@ -96,15 +108,19 @@ export class ClientEngine implements Engine<ClientEvent> {
     return this.#link.health;
   }
 
-  /** Queues a Message until the next send step; throws if it can never be sent. */
-  send(id: number, body: Uint8Array, delivery: DeliveryMode): void {
+  /**
+   * Queues a Message until the next send step; throws if it can never be
+   * sent. Returns false, queuing nothing, for an Unreliable or Sequenced
+   * Message refused by the Send budget.
+   */
+  send(id: number, body: Uint8Array, delivery: DeliveryMode): boolean {
     if (this.#closeReason)
       throw new Error(
         `The Connection is closed (${this.#closeReason.kind}); nothing more can be sent on it`,
       );
     if (this.#state !== "connected")
       throw new Error("The Client can only send once it is connected");
-    this.#link.send(id, body, delivery);
+    return this.#link.send(id, body, delivery);
   }
 
   /**

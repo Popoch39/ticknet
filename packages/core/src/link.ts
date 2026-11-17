@@ -1,6 +1,8 @@
 import {
   encodeDatagram,
+  MAX_DATAGRAM_SIZE,
   packMessages,
+  PackedSize,
   type ConnectedDatagram,
   type MessageEntry,
 } from "./datagram";
@@ -18,6 +20,21 @@ import { SentDatagrams, type ConnectionHealth } from "./sent-datagrams";
  */
 export function keepaliveInterval(timeout: number): number {
   return Math.min(1000, timeout / 4);
+}
+
+/**
+ * The Send budget of a Connection when the game sets none, in bytes per Tick
+ * (per send step on the Client): four full Datagrams, about 1.2 Mbit/s at
+ * 30 Ticks per second.
+ */
+export const DEFAULT_SEND_BUDGET = 4 * MAX_DATAGRAM_SIZE;
+
+/** Throws a RangeError for a Send budget that could not carry a full Datagram, or that is not a whole number of bytes. */
+export function assertSendBudget(sendBudget: number): void {
+  if (!(Number.isInteger(sendBudget) && sendBudget >= MAX_DATAGRAM_SIZE))
+    throw new RangeError(
+      `The Send budget must be a whole number of bytes, at least ${MAX_DATAGRAM_SIZE} so that a full Datagram fits in it, not ${sendBudget}`,
+    );
 }
 
 /**
@@ -54,11 +71,16 @@ export class Link {
    */
   #acknowledgementDue = false;
   #lastSentAt: number;
+  /** The most bytes one flush puts on the network. */
+  readonly #sendBudget: number;
+  /** What the Unreliable and Sequenced Messages queued for the next flush take on the network. */
+  #queued = new PackedSize();
 
   /** `now` counts as the last time something was sent. */
-  constructor(keepaliveInterval: number, now: number) {
+  constructor(keepaliveInterval: number, now: number, sendBudget: number) {
     this.#keepaliveInterval = keepaliveInterval;
     this.#lastSentAt = now;
+    this.#sendBudget = sendBudget;
   }
 
   get health(): ConnectionHealth {
@@ -70,12 +92,28 @@ export class Link {
     return this.#reliableOut.overflowed;
   }
 
-  /** Queues a Message until the next flush; throws a RangeError if it can never fit in one Datagram. */
-  send(id: number, body: Uint8Array, delivery: DeliveryMode): void {
+  /**
+   * Queues a Message until the next flush; throws a RangeError if it can
+   * never fit in one Datagram. Returns false, queuing nothing, for an
+   * Unreliable or Sequenced Message that does not fit in what remains of the
+   * Send budget of the next flush.
+   */
+  send(id: number, body: Uint8Array, delivery: DeliveryMode): boolean {
     if (delivery === "reliable") {
       assertFitsInDatagram(id, body, delivery);
       this.#reliableOut.push(id, body);
-    } else this.#outbox.push(id, body, delivery);
+      return true;
+    }
+    assertFitsInDatagram(id, body, delivery);
+    // Room is kept for the Reliable Messages already due, so that sending these cannot starve them.
+    if (
+      this.#queued.with({ delivery, body }) + this.#reliableOut.waiting >
+      this.#sendBudget
+    )
+      return false;
+    this.#outbox.push(id, body, delivery);
+    this.#queued.add({ delivery, body });
+    return true;
   }
 
   /**
@@ -104,16 +142,25 @@ export class Link {
 
   /**
    * Empties the queue into connected Datagrams sent at `now`, stamped with
-   * the sender's `tick`, along with the Reliable Messages due to be sent
-   * again. With nothing to send, sends one without Messages if an
+   * the sender's `tick`, along with as many of the Reliable Messages due (to
+   * be sent again, or not sent yet) as the rest of the Send budget allows;
+   * those left out stay due, and Unreliable or Sequenced Messages queued
+   * before the next flush leave room for them. With nothing to send, sends
+   * one without Messages, well within any budget, if an
    * acknowledgement is due, or as a keepalive if nothing left for the
    * keepalive interval.
    */
   flush(tick: number, now: number): Uint8Array[] {
+    // The queued Messages were admitted against the budget, so the Reliable stream gets what they leave.
     const groups = packMessages([
-      ...this.#reliableOut.take(now, this.#sent.resendDelay),
+      ...this.#reliableOut.take(
+        now,
+        this.#sent.resendDelay,
+        this.#sendBudget - this.#queued.bytes,
+      ),
       ...this.#outbox.take(),
     ]);
+    this.#queued = new PackedSize();
     if (
       groups.length === 0 &&
       (this.#acknowledgementDue ||

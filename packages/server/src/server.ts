@@ -60,11 +60,17 @@ export interface ServerOptions {
    * ignored, freeing the Client's place.
    */
   readonly timeout?: number;
+  /**
+   * The most bytes the Server puts on the network for each Connection per
+   * Tick, resends and acknowledgements included; DEFAULT_SEND_BUDGET by
+   * default. What is left unused in one Tick is not carried over.
+   */
+  readonly sendBudget?: number;
 }
 
 /** What a Connection needs from its Server. */
 interface ConnectionLink {
-  send(id: number, body: Uint8Array, delivery: DeliveryMode): void;
+  send(id: number, body: Uint8Array, delivery: DeliveryMode): boolean;
   close(code: number): void;
   health(): ConnectionHealth | undefined;
 }
@@ -104,9 +110,13 @@ export class Connection<Data = undefined> {
    * if the Message cannot fit in one Datagram, or if the Connection has
    * closed. A Reliable Message is sent again until the Client acknowledges
    * it; with more than MAX_RELIABLE_BACKLOG waiting, the Connection closes.
+   *
+   * Returns false, sending nothing, when an Unreliable or Sequenced Message
+   * does not fit in what is left of this Tick's Send budget. A Reliable
+   * Message is never refused: what does not fit waits for later Ticks.
    */
-  send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
-    this.#link.send(type.id, type.encode(value), delivery);
+  send<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): boolean {
+    return this.#link.send(type.id, type.encode(value), delivery);
   }
 
   /**
@@ -186,6 +196,7 @@ export class Server<Data = undefined> {
         tickRate: options.tickRate ?? 30,
         maxConnections: options.maxConnections ?? 64,
         timeout: options.timeout ?? 10_000,
+        sendBudget: options.sendBudget,
       },
       clock.now(),
     );
@@ -242,9 +253,18 @@ export class Server<Data = undefined> {
   /**
    * Sends a Message to every open Connection when the current Tick ends.
    * Throws at once, sending to none, if the Message cannot fit in one Datagram.
+   * Returns the Connections that refused an Unreliable or Sequenced Message
+   * because it did not fit in what is left of their Send budget for this
+   * Tick; empty when every one took it.
    */
-  broadcast<T>(type: MessageType<T>, value: T, delivery: DeliveryMode): void {
-    this.#engine.broadcast(type.id, type.encode(value), delivery);
+  broadcast<T>(
+    type: MessageType<T>,
+    value: T,
+    delivery: DeliveryMode,
+  ): Connection<Data>[] {
+    return this.#engine
+      .broadcast(type.id, type.encode(value), delivery)
+      .flatMap((id) => this.#connections.get(id) ?? []);
   }
 
   /**
@@ -363,13 +383,19 @@ export async function startServer(
     return new Server<unknown>(options, authenticate, options.transport, clock);
   const hostname = await resolveHost(options.host ?? "0.0.0.0");
   const socket = await openUdpTransport(hostname, options.port ?? 0);
-  return new Server<unknown>(
-    options,
-    authenticate,
-    socket.transport,
-    clock,
-    socket.port,
-  );
+  try {
+    return new Server<unknown>(
+      options,
+      authenticate,
+      socket.transport,
+      clock,
+      socket.port,
+    );
+  } catch (error) {
+    // Invalid options: the socket is already open and must not keep the process alive.
+    socket.transport.close();
+    throw error;
+  }
 }
 
 function withData(

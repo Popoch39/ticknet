@@ -9,7 +9,12 @@ import {
 } from "./datagram";
 import type { Engine } from "./engine";
 import type { DeliveryMode } from "./message";
-import { keepaliveInterval, Link } from "./link";
+import {
+  assertSendBudget,
+  DEFAULT_SEND_BUDGET,
+  keepaliveInterval,
+  Link,
+} from "./link";
 import { assertFitsInDatagram } from "./outbox";
 import type { ConnectionHealth } from "./sent-datagrams";
 import { SequencedOrder } from "./sequenced-order";
@@ -59,6 +64,8 @@ export interface ServerEngineConfig {
    * closes with a timeout reason.
    */
   readonly timeout: number;
+  /** The most bytes each Connection puts on the network per Tick; DEFAULT_SEND_BUDGET by default. */
+  readonly sendBudget?: number;
 }
 
 interface OpenConnection {
@@ -86,6 +93,7 @@ export class ServerEngine implements Engine<ServerEvent> {
   readonly #ticks: Cadence;
   readonly #maxConnections: number;
   readonly #timeout: number;
+  readonly #sendBudget: number;
   /** Proven addresses waiting for the authentication decision, in the order they were asked about. */
   readonly #authenticating = new Map<
     ConnectionId,
@@ -123,28 +131,44 @@ export class ServerEngine implements Engine<ServerEvent> {
     this.#ticks = new Cadence(now, config.tickRate, "Tick rate");
     this.#maxConnections = config.maxConnections;
     this.#timeout = config.timeout;
+    this.#sendBudget = config.sendBudget ?? DEFAULT_SEND_BUDGET;
+    assertSendBudget(this.#sendBudget);
   }
 
-  /** Queues a Message until the end of the Tick; throws if it can never be sent. */
+  /**
+   * Queues a Message until the end of the Tick; throws if it can never be
+   * sent. Returns false, queuing nothing, for an Unreliable or Sequenced
+   * Message refused by the Connection's Send budget.
+   */
   send(
     connection: ConnectionId,
     id: number,
     body: Uint8Array,
     delivery: DeliveryMode,
-  ): void {
+  ): boolean {
     const open = this.#byId.get(connection);
     // Ids are never reused, so one that is not open has closed.
     if (!open)
       throw new Error(
         `Connection ${connection} is closed; nothing more can be sent on it`,
       );
-    open.link.send(id, body, delivery);
+    return open.link.send(id, body, delivery);
   }
 
-  /** Queues a Message to every open Connection; throws, sending to none, if it can never be sent. */
-  broadcast(id: number, body: Uint8Array, delivery: DeliveryMode): void {
+  /**
+   * Queues a Message to every open Connection; throws, sending to none, if it
+   * can never be sent. Returns the Connections whose Send budget refused it.
+   */
+  broadcast(
+    id: number,
+    body: Uint8Array,
+    delivery: DeliveryMode,
+  ): ConnectionId[] {
     assertFitsInDatagram(id, body, delivery);
-    for (const open of this.#byId.values()) open.link.send(id, body, delivery);
+    const refused: ConnectionId[] = [];
+    for (const open of this.#byId.values())
+      if (!open.link.send(id, body, delivery)) refused.push(open.id);
+    return refused;
   }
 
   /** The round-trip time and loss rate measured on an open Connection; undefined if it is not open. */
@@ -221,7 +245,7 @@ export class ServerEngine implements Engine<ServerEvent> {
       id: connection,
       address,
       challenge,
-      link: new Link(keepaliveInterval(this.#timeout), now),
+      link: new Link(keepaliveInterval(this.#timeout), now, this.#sendBudget),
       sequenced: new SequencedOrder(),
     };
     this.#byAddress.set(addressKey(address), open);

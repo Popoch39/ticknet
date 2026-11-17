@@ -1,4 +1,5 @@
 export {
+  DEFAULT_SEND_BUDGET,
   defineMessages,
   MAX_AUTH_TOKEN_SIZE,
   MAX_RELIABLE_BACKLOG,
