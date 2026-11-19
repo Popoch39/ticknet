@@ -1,0 +1,46 @@
+name: Bug report
+description: Something in ticknet does not behave as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Security issues go through [SECURITY.md](https://github.com/Popoch39/ticknet/blob/main/SECURITY.md), not a public issue.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happens
+      description: What you observed, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: The smallest code that shows it. A test over the simulated network of `@ticknet/core/testing`, with its seed, is the best reproduction.
+      render: ts
+    validations:
+      required: true
+  - type: input
+    id: ticknet-version
+    attributes:
+      label: ticknet version
+      placeholder: "0.0.2"
+    validations:
+      required: true
+  - type: input
+    id: bun-version
+    attributes:
+      label: Bun version
+      description: The output of `bun --version`.
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or close reason
+      description: Any error, and the reason the Connection closed if it did.
+      render: text
