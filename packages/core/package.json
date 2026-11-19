@@ -1,8 +1,26 @@
 {
   "name": "@ticknet/core",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "The sans-IO protocol core of ticknet, a UDP transport for real-time Bun games.",
   "license": "MIT",
+  "keywords": [
+    "bun",
+    "udp",
+    "netcode",
+    "multiplayer",
+    "game-networking",
+    "realtime",
+    "transport",
+    "reliable-udp",
+    "gamedev"
+  ],
+  "homepage": "https://github.com/Popoch39/ticknet#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Popoch39/ticknet.git",
+    "directory": "packages/core"
+  },
+  "bugs": "https://github.com/Popoch39/ticknet/issues",
   "type": "module",
   "scripts": {
     "prepack": "bun ../../scripts/build.ts"

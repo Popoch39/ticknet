@@ -20,18 +20,18 @@
     },
     "packages/client": {
       "name": "@ticknet/client",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@ticknet/core": "workspace:*",
       },
     },
     "packages/core": {
       "name": "@ticknet/core",
-      "version": "0.0.1",
+      "version": "0.0.2",
     },
     "packages/server": {
       "name": "@ticknet/server",
-      "version": "0.0.1",
+      "version": "0.0.2",
       "dependencies": {
         "@ticknet/core": "workspace:*",
       },
